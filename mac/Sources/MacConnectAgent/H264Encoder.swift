@@ -15,6 +15,7 @@ final class H264Encoder {
     private var failed = false
     private var parameterSets = Data()
     private var frameIndex: Int64 = 0
+    private var needsKeyframe = true
     private let callback: VTCompressionOutputCallback = { refcon, sourceFrameRefcon, status, _, sampleBuffer in
         guard let refcon, let sourceFrameRefcon else { return }
         let encoder = Unmanaged<H264Encoder>.fromOpaque(refcon).takeUnretainedValue()
@@ -69,8 +70,9 @@ final class H264Encoder {
         set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 1))
         set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: 60))
         set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 0))
-        set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 8_000_000))
-        let limits = [NSNumber(value: 1_500_000), NSNumber(value: 1)] as CFArray
+        set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: 20_000_000))
+        // A hard cap. Window drags change most of the screen, and a tight cap turns that into blocky glitches.
+        let limits = [NSNumber(value: 5_000_000), NSNumber(value: 1)] as CFArray
         VTSessionSetProperty(session, key: kVTCompressionPropertyKey_DataRateLimits, value: limits)
         VTCompressionSessionPrepareToEncodeFrames(session)
         Log.line("H.264 encoder ready at \(width)x\(height)")
@@ -92,7 +94,7 @@ final class H264Encoder {
         gate.unlock()
         while finished.wait(timeout: .now()) == .success {}
 
-        let force = frameIndex == 0
+        let force = needsKeyframe
         frameIndex += 1
         let properties: CFDictionary? = force
             ? [kVTEncodeFrameOptionKey_ForceKeyFrame: kCFBooleanTrue!] as CFDictionary
@@ -107,13 +109,23 @@ final class H264Encoder {
             sourceFrameRefcon: UnsafeMutableRawPointer(bitPattern: UInt(ticket)),
             infoFlagsOut: &flags
         )
-        guard status == noErr else { return nil }
-        if finished.wait(timeout: .now() + .milliseconds(30)) == .timedOut {
+        guard status == noErr else {
+            needsKeyframe = true
+            return nil
+        }
+        // Wait long enough for a hard frame (a window being dragged). Giving up here drops a picture
+        // the next one still refers to, which shows up as glitches until the next keyframe.
+        if finished.wait(timeout: .now() + .milliseconds(150)) == .timedOut {
+            needsKeyframe = true
             return nil
         }
         gate.lock()
         defer { gate.unlock() }
-        if failed || completed != ticket || encoded.isEmpty { return nil }
+        if failed || completed != ticket || encoded.isEmpty {
+            needsKeyframe = true
+            return nil
+        }
+        needsKeyframe = false
         return encoded
     }
 

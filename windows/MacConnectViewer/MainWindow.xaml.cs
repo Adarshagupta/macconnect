@@ -20,7 +20,7 @@ public partial class MainWindow : Window
 {
     private SessionService? _session;
     private readonly object _frameLock = new();
-    private byte[]? _pendingFrame;
+    private readonly Queue<byte[]> _pendingFrames = new();
     private bool _decoding;
     private BitmapSource? _readyImage;
     private byte[]? _readyPixels;
@@ -140,13 +140,14 @@ public partial class MainWindow : Window
         });
     }
 
-    /// Called for every picture from the Mac, on the network thread. Only the newest waiting picture is
-    /// kept, and it is decoded on a background thread so the window never waits on decoding.
+    /// Called for every picture from the Mac, on the network thread. H.264 pictures depend on the ones
+    /// before them, so every picture is decoded in order. Only the newest finished picture is shown.
     private void OnFrameReceived(byte[] frame)
     {
         lock (_frameLock)
         {
-            _pendingFrame = frame;
+            _pendingFrames.Enqueue(frame);
+            TrimFrameQueue();
             if (_decoding)
             {
                 return;
@@ -158,6 +159,76 @@ public partial class MainWindow : Window
         _ = Task.Run(DecodeLoop);
     }
 
+    /// If decoding falls a long way behind, jump to the newest keyframe. Dropping any other picture
+    /// would break the ones after it, which shows up as glitches while things move.
+    private void TrimFrameQueue()
+    {
+        if (_pendingFrames.Count <= 90)
+        {
+            return;
+        }
+
+        var frames = _pendingFrames.ToArray();
+        var syncAt = -1;
+        for (var i = frames.Length - 1; i >= 0; i--)
+        {
+            if (IsSyncFrame(frames[i]))
+            {
+                syncAt = i;
+                break;
+            }
+        }
+
+        if (syncAt <= 0)
+        {
+            return;
+        }
+
+        _pendingFrames.Clear();
+        for (var i = syncAt; i < frames.Length; i++)
+        {
+            _pendingFrames.Enqueue(frames[i]);
+        }
+    }
+
+    private static bool IsSyncFrame(byte[] frame)
+    {
+        if (frame.Length >= 2 && frame[0] == 0xFF && frame[1] == 0xD8)
+        {
+            return true;
+        }
+
+        var limit = Math.Min(frame.Length - 4, 80);
+        for (var i = 0; i < limit; i++)
+        {
+            int nal;
+            if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 1)
+            {
+                nal = frame[i + 3] & 0x1F;
+            }
+            else if (frame[i] == 0 && frame[i + 1] == 0 && frame[i + 2] == 0 && frame[i + 3] == 1 && i + 4 < frame.Length)
+            {
+                nal = frame[i + 4] & 0x1F;
+            }
+            else
+            {
+                continue;
+            }
+
+            if (nal is 5 or 7)
+            {
+                return true;
+            }
+
+            if (nal is 1 or 2)
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
     private void DecodeLoop()
     {
         while (true)
@@ -165,13 +236,13 @@ public partial class MainWindow : Window
             byte[]? frame;
             lock (_frameLock)
             {
-                frame = _pendingFrame;
-                _pendingFrame = null;
-                if (frame is null)
+                if (_pendingFrames.Count == 0)
                 {
                     _decoding = false;
                     return;
                 }
+
+                frame = _pendingFrames.Dequeue();
             }
 
             BitmapSource? image = null;
@@ -296,6 +367,11 @@ public partial class MainWindow : Window
 
     private void OnDisconnected()
     {
+        lock (_frameLock)
+        {
+            _pendingFrames.Clear();
+        }
+
         Dispatcher.BeginInvoke(() =>
         {
             _showing = false;
