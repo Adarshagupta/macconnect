@@ -22,6 +22,7 @@ public static class Wire
     public const byte Ping = 5;
     public const byte Pong = 6;
     public const byte Accept = 7;
+    public const byte Cursor = 8;
 
     public const byte MouseMove = 0;
     public const byte MouseDown = 1;
@@ -76,6 +77,29 @@ public static class Wire
         var payload = new byte[3];
         BinaryPrimitives.WriteUInt16LittleEndian(payload.AsSpan(0, 2), virtualKey);
         payload[2] = down ? (byte)1 : (byte)0;
+        return payload;
+    }
+
+    /// Reads the Mac pointer position (two Float32 values from 0 to 1).
+    public static bool TryParseCursor(ReadOnlySpan<byte> payload, out float x, out float y)
+    {
+        x = 0;
+        y = 0;
+        if (payload.Length < 8)
+        {
+            return false;
+        }
+
+        x = BinaryPrimitives.ReadSingleLittleEndian(payload);
+        y = BinaryPrimitives.ReadSingleLittleEndian(payload[4..]);
+        return float.IsFinite(x) && float.IsFinite(y);
+    }
+
+    public static byte[] BuildCursor(float x, float y)
+    {
+        var payload = new byte[8];
+        BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(0, 4), x);
+        BinaryPrimitives.WriteSingleLittleEndian(payload.AsSpan(4, 4), y);
         return payload;
     }
 

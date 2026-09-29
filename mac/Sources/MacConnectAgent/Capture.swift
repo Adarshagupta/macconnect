@@ -10,8 +10,8 @@ import ScreenCaptureKit
 /// still screen costs nothing. Pictures are handed over raw; `encode` compresses one at the moment the
 /// network is ready for it, so the newest screen is always the one that gets sent.
 ///
-/// The Mac's own mouse pointer is left out of the picture on purpose. The Windows pointer is drawn
-/// locally and moves instantly, so the pointer never lags behind the hand.
+/// The Mac's own mouse pointer is left out of the picture on purpose. Its position is sent separately
+/// (Session.startCursorSender) and Windows draws it on top, so it moves without waiting for a picture.
 final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "com.macconnect.capture")
@@ -38,7 +38,8 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let longSide = max(display.width, display.height)
-        let scale = min(1.0, 1920.0 / Double(max(longSide, 1)))
+        // Sharper than before: up to 2560 pixels on the long side (was 1920).
+        let scale = min(1.0, 2560.0 / Double(max(longSide, 1)))
         var width = Int((Double(display.width) * scale).rounded(.down))
         var height = Int((Double(display.height) * scale).rounded(.down))
         width = max(2, width - (width % 2))

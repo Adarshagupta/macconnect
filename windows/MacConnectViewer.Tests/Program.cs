@@ -40,6 +40,14 @@ service.FrameReceived += frame =>
     frames.Release();
 };
 service.Disconnected += () => Interlocked.Increment(ref disconnected);
+var cursors = new SemaphoreSlim(0);
+float cursorX = -1, cursorY = -1;
+service.CursorReceived += (x, y) =>
+{
+    cursorX = x;
+    cursorY = y;
+    cursors.Release();
+};
 service.Start();
 
 static byte[] HelloPayload(string name, int width, int height)
@@ -154,6 +162,12 @@ Check(service.IsConnected, "IsConnected is true after accept");
 var jpeg = new byte[] { 0xFF, 0xD8, 0xFF, 0xD9 };
 await SendAsync(streamA, Wire.Frame, jpeg);
 Check(await frames.WaitAsync(3000) && lastFrame is not null && lastFrame.SequenceEqual(jpeg), "frame payload is delivered intact");
+
+// 2b. The Mac pointer position reaches the UI.
+await SendAsync(streamA, Wire.Cursor, Wire.BuildCursor(0.25f, 0.75f));
+Check(await cursors.WaitAsync(3000) && Math.Abs(cursorX - 0.25f) < 0.0001f && Math.Abs(cursorY - 0.75f) < 0.0001f, "Mac pointer position is delivered");
+await SendAsync(streamA, Wire.Cursor, new byte[] { 1, 2 });
+Check(!await cursors.WaitAsync(300), "a short pointer message is ignored");
 
 // 3. Viewer pings the Mac, and input reaches the Mac.
 var ping = await ReadUntilAsync(streamA, Wire.Ping, 5000);

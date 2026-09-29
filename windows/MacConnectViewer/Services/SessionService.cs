@@ -36,6 +36,7 @@ public sealed class SessionService : IDisposable
 
     public event Action<string, int, int>? MacAccepted;
     public event Action<byte[]>? FrameReceived;
+    public event Action<float, float>? CursorReceived;
     public event Action? Disconnected;
 
     public void Start()
@@ -218,6 +219,13 @@ public sealed class SessionService : IDisposable
                         if (ReferenceEquals(_active, connection))
                         {
                             FrameReceived?.Invoke(message.Value.Payload);
+                        }
+
+                        break;
+                    case Wire.Cursor:
+                        if (ReferenceEquals(_active, connection) && Wire.TryParseCursor(message.Value.Payload, out var cursorX, out var cursorY))
+                        {
+                            CursorReceived?.Invoke(cursorX, cursorY);
                         }
 
                         break;

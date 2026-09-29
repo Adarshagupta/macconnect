@@ -25,6 +25,10 @@ public partial class MainWindow : Window
     private BitmapSource? _readyImage;
     private bool _presentQueued;
     private bool _showing;
+    private float _cursorX;
+    private float _cursorY;
+    private bool _cursorQueued;
+    private bool _cursorSeen;
     private int _frameWidth;
     private int _frameHeight;
     private bool _userShrunk;
@@ -47,6 +51,7 @@ public partial class MainWindow : Window
         PreviewKeyDown += OnPreviewKeyDown;
         PreviewKeyUp += OnPreviewKeyUp;
         Deactivated += (_, _) => ReleaseAllInput();
+        SizeChanged += (_, _) => UpdateCursor();
     }
 
     public void Attach(SessionService session)
@@ -54,6 +59,7 @@ public partial class MainWindow : Window
         _session = session;
         session.MacAccepted += OnMacAccepted;
         session.FrameReceived += OnFrameReceived;
+        session.CursorReceived += OnCursorReceived;
         session.Disconnected += OnDisconnected;
     }
 
@@ -234,6 +240,9 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             _showing = false;
+            _cursorSeen = false;
+            MacCursor.Visibility = Visibility.Collapsed;
+            FrameImage.Cursor = null;
             FrameImage.Source = null;
             AddressText.Text = NetworkInfo.Describe();
             WaitingPanel.Visibility = Visibility.Visible;
@@ -449,10 +458,13 @@ public partial class MainWindow : Window
         _ => Wire.ButtonNone,
     };
 
-    private bool TryNormalize(Point position, out float x, out float y)
+    /// Where the Mac picture sits inside the window (the picture keeps its shape, so there can be bars).
+    private bool TryGetContentRect(out double contentX, out double contentY, out double contentWidth, out double contentHeight)
     {
-        x = 0;
-        y = 0;
+        contentX = 0;
+        contentY = 0;
+        contentWidth = 0;
+        contentHeight = 0;
         if (_frameWidth <= 0 || _frameHeight <= 0)
         {
             return false;
@@ -467,10 +479,6 @@ public partial class MainWindow : Window
 
         var imageAspect = _frameWidth / (double)_frameHeight;
         var controlAspect = controlWidth / controlHeight;
-        double contentX;
-        double contentY;
-        double contentWidth;
-        double contentHeight;
         if (controlAspect > imageAspect)
         {
             contentHeight = controlHeight;
@@ -484,6 +492,65 @@ public partial class MainWindow : Window
             contentHeight = controlWidth / imageAspect;
             contentX = 0;
             contentY = (controlHeight - contentHeight) / 2;
+        }
+
+        return true;
+    }
+
+    /// Called on the network thread for every Mac pointer position. Only the newest one is drawn.
+    private void OnCursorReceived(float x, float y)
+    {
+        bool queue;
+        lock (_frameLock)
+        {
+            _cursorX = x;
+            _cursorY = y;
+            queue = !_cursorQueued;
+            _cursorQueued = true;
+        }
+
+        if (queue)
+        {
+            Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(UpdateCursor));
+        }
+    }
+
+    private void UpdateCursor()
+    {
+        float x;
+        float y;
+        lock (_frameLock)
+        {
+            x = _cursorX;
+            y = _cursorY;
+            _cursorQueued = false;
+        }
+
+        if (!_showing || !TryGetContentRect(out var contentX, out var contentY, out var contentWidth, out var contentHeight))
+        {
+            return;
+        }
+
+        if (!_cursorSeen)
+        {
+            // From now on the Mac pointer is the one you follow, so the Windows pointer is hidden over the picture.
+            // Older Mac agents never send a position, so in that case the Windows pointer stays visible.
+            _cursorSeen = true;
+            FrameImage.Cursor = System.Windows.Input.Cursors.None;
+            MacCursor.Visibility = Visibility.Visible;
+        }
+
+        System.Windows.Controls.Canvas.SetLeft(MacCursor, contentX + Math.Clamp(x, 0f, 1f) * contentWidth);
+        System.Windows.Controls.Canvas.SetTop(MacCursor, contentY + Math.Clamp(y, 0f, 1f) * contentHeight);
+    }
+
+    private bool TryNormalize(Point position, out float x, out float y)
+    {
+        x = 0;
+        y = 0;
+        if (!TryGetContentRect(out var contentX, out var contentY, out var contentWidth, out var contentHeight))
+        {
+            return false;
         }
 
         if (position.X < contentX || position.Y < contentY ||

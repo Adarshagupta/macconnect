@@ -46,6 +46,7 @@ Maximum payload length is 8,000,000 bytes. A larger length closes the connection
 | 5 | Ping | Windows | empty |
 | 6 | Pong | Mac | empty |
 | 7 | Accept | Windows | empty |
+| 8 | Cursor | Mac | 8 bytes: `x` and `y` as little-endian Float32, each from 0 to 1 across the display. Sent whenever the Mac pointer moves, and at least once a second. Windows draws the pointer itself. Viewers that do not know type 8 ignore it. |
 
 ### Hello payload
 

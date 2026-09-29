@@ -14,6 +14,17 @@
                MouseUp="OnMouseUp"
                MouseWheel="OnMouseWheel"
                MouseLeave="OnMouseLeave"/>
+        <Canvas x:Name="CursorLayer"
+                IsHitTestVisible="False"
+                ClipToBounds="True">
+            <Polygon x:Name="MacCursor"
+                     Visibility="Collapsed"
+                     Points="0,0 0,17 4.5,13 7.5,20 10,19 7,12 12.5,12"
+                     Fill="Black"
+                     Stroke="White"
+                     StrokeThickness="1.2"
+                     StrokeLineJoin="Round"/>
+        </Canvas>
         <StackPanel x:Name="WaitingPanel"
                     VerticalAlignment="Center"
                     HorizontalAlignment="Center"

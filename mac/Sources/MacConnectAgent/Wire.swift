@@ -14,6 +14,20 @@ enum Wire {
     static let ping: UInt8 = 5
     static let pong: UInt8 = 6
     static let accept: UInt8 = 7
+    static let cursor: UInt8 = 8
+
+    /// Where the Mac pointer is, as a fraction of the display (0 to 1). Two little-endian Float32 values.
+    static func cursorPayload(x: Float, y: Float) -> Data {
+        var payload = Data()
+        for value in [x, y] {
+            let bits = value.bitPattern
+            payload.append(UInt8(bits & 0xff))
+            payload.append(UInt8((bits >> 8) & 0xff))
+            payload.append(UInt8((bits >> 16) & 0xff))
+            payload.append(UInt8((bits >> 24) & 0xff))
+        }
+        return payload
+    }
 
     static let mouseMove: UInt8 = 0
     static let mouseDown: UInt8 = 1

@@ -116,7 +116,7 @@ Keys are mapped for a US keyboard. Letters, numbers, arrows, function keys, and 
 
 ## Speed
 
-The Mac always sends its newest picture and drops older ones, so the picture does not fall behind. Picture quality goes down a little on its own if the network is slow, and back up when it is fast. The Mac's pointer is not drawn in the picture. You see the Windows pointer instead, which moves with no delay. Wired Ethernet on the Windows PC, or 5 GHz Wi-Fi on both, gives the smoothest result.
+The Mac always sends its newest picture and drops older ones, so the picture does not fall behind. The picture is sent sharp (up to 2560 pixels wide, high JPEG quality). Quality goes down a little on its own, never far, if the network is slow, and back up when it is fast. The Mac's pointer is not drawn in the picture. The Mac sends its pointer position separately, about 120 times a second, and the viewer draws it on top, so you see the Mac pointer (also when you move it with the Mac's own trackpad) without waiting for a new picture. It is drawn as a plain arrow, whatever shape the Mac pointer has. The Windows pointer is hidden over the picture once the Mac pointer starts arriving. The Mac also compresses the next picture while it sends the previous one. Wired Ethernet on the Windows PC, or 5 GHz Wi-Fi on both, gives the smoothest result.
 
 ## Things that can still go wrong
 
