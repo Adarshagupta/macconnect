@@ -1,6 +1,6 @@
 # MacConnect
 
-MacConnect shows your Mac desktop on a Windows PC on the same Wi-Fi or Ethernet network. The Windows keyboard and mouse control the Mac. Use it when the MacBook screen is working poorly.
+MacConnect shows your Mac desktop on a Windows PC on the same Wi-Fi or Ethernet network. An Android phone can show it too, on that network or over a USB cable. The other computer's keyboard and mouse, or the phone's touch, control the Mac. Use it when the MacBook screen is working poorly.
 
 The Windows app starts when you sign in and waits for the Mac. The Mac app starts when you log in, finds the Windows PC, and reconnects if either machine sleeps, reboots, or drops off the network.
 
@@ -88,6 +88,30 @@ If FileVault is on, macOS will not log in automatically after a full shutdown or
 3. The Windows PC should show the Mac desktop without you clicking anything.
 4. Move the mouse on that window. The pointer on the Mac should follow.
 
+## 5. Use the Mac from a phone
+
+The Android app in `phone` shows the same desktop. Touch the picture to click, drag to move, and use two fingers to scroll. A long press is a right click. The keyboard button types on the Mac. Command, Option, Control, and Shift are in that keyboard.
+
+Install the Mac agent again after this update (`bash scripts/install-mac.sh`). The agent listens for the phone and also keeps serving Windows. The first time it listens, macOS may ask to allow incoming connections. Allow it.
+
+On the phone, from the `phone` folder:
+
+```bash
+flutter pub get
+flutter run
+```
+
+The app lists the Mac when it sees it. You can also type the Mac's address. The agent log lists the addresses it is announcing (`~/Library/Logs/MacConnect/agent.log`).
+
+### Cable
+
+Plug the phone into the Mac, open the app's Cable screen, then either:
+
+1. **USB tethering.** On the phone: Settings, then Hotspot and tethering, then USB tethering. The Mac shows up in the list.
+2. **USB debugging.** Turn on Developer options and USB debugging, and accept the prompt on the phone. If `adb` is installed on the Mac, the agent forwards the cable and **Connect through USB debugging** reaches the Mac. Install it with `brew install android-platform-tools` if that button cannot connect.
+
+Leave the phone unlocked while you use it. The Windows viewer can stay open at the same time.
+
 ## If the Mac cannot find the Windows PC
 
 The Mac finds this PC by listening for a message it broadcasts once a second. Some routers block that on Wi-Fi ("client isolation", "AP isolation", or some guest and mesh networks).
@@ -123,7 +147,7 @@ The Mac encodes the screen with hardware H.264 and sends only the newest picture
 - **Permission prompts.** macOS 15 and later asks now and then whether an app may keep recording the screen. That prompt appears on the Mac screen, which you may not be able to see. If MacConnect stops showing the Mac after a system update, use the backup above to reach the Mac.
 - **Lid closed.** A MacBook with the lid closed and no external monitor goes to sleep no matter what the agent does.
 - **Different networks.** Both computers must be on the same network.
-- **Anyone on your network.** The Mac shows its screen to whichever Windows viewer answers on your home network. Do not use this on a network you do not trust.
+- **Anyone on your network.** The Mac shows its screen to whichever Windows viewer answers, and to a phone that connects to it, on your home network. Do not use this on a network you do not trust.
 - **Not tested on a Mac here.** The Windows viewer and its connection handling are tested automatically. The Mac agent was written without access to a Mac, so run the steps above while you can still see the Mac screen, and check that it works before you rely on it.
 
 ## Checks and tests
@@ -133,4 +157,6 @@ The Mac encodes the screen with hardware H.264 and sends only the newest picture
 
 ## Ports
 
-The Windows PC listens on TCP port **47900** and broadcasts a message on UDP port **47901** once a second. The installer adds a firewall rule for TCP 47900 only. The Mac connects to the Windows PC; you do not open ports on the Mac.
+The Windows PC listens on TCP port **47900** and broadcasts a message on UDP port **47901** once a second. The installer adds a firewall rule for TCP 47900 only. The Mac connects to the Windows PC; you do not open ports on the Mac for that.
+
+The Mac listens on TCP port **47902** for a phone, and announces itself on UDP port **47903**. A USB debugging cable uses that same TCP port, forwarded by `adb`.

@@ -37,6 +37,7 @@ final class Agent {
 
     func run() async {
         Log.line("MacConnect agent started as \"\(Wire.computerName)\"")
+        PhoneHub.shared.start()
         while true {
             Heartbeat.beat()
 

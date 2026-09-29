@@ -8,6 +8,8 @@ Home-network protocol between the Mac agent and the Windows viewer. All multi-by
 | --- | --- | --- | --- |
 | 47901 | UDP | Windows broadcasts, Mac listens | Discovery beacon, once per second |
 | 47900 | TCP | Mac connects to Windows | Desktop frames and input |
+| 47903 | UDP | Mac broadcasts, phone listens | Phone discovery beacon, once per second |
+| 47902 | TCP | Phone connects to Mac | Same desktop frames and input as port 47900 |
 
 ## UDP beacon
 
@@ -94,3 +96,20 @@ The Mac maps these codes to macOS virtual key codes for a US keyboard.
 6. The viewer sends Ping about every 2 seconds, including while the allow prompt is open, so the Mac does not give up if the person takes a while to answer. The Mac replies with Pong.
 7. Once Hello has been received, either side that sees no inbound message for 6 seconds closes the connection and the Mac tries again. Before Hello, the viewer waits up to 20 seconds.
 8. The viewer handles each connection separately. When a Mac that is already accepted connects again, the new connection is accepted as soon as it is approved and the old one is closed. This way a stale or half-open connection can never keep the Mac out.
+
+## Phone
+
+The phone is a second viewer. It does not replace the Windows one, and both can be connected at the same time.
+
+The Mac sends the same beacon layout as Windows, once a second, to UDP port **47903** on each local network (including a USB tether). The TCP port inside the beacon is **47902**. The Mac does not listen for these beacons, so it does not try to connect to itself.
+
+The phone opens TCP **47902**. From there the messages match the Windows session, with the phone in the viewer's role:
+
+1. The Mac sends Hello.
+2. The phone sends Accept. The Mac does not send frames before Accept.
+3. The phone sends Ping about every 2 seconds. The Mac replies with Pong.
+4. The Mac streams Frame and Cursor. The phone sends Mouse and Key.
+
+A new phone connection replaces the previous phone connection. The Windows session is left as it is.
+
+USB debugging uses the same TCP port. When `adb` is available, the Mac runs `adb reverse tcp:47902 tcp:47902`, and the phone opens `127.0.0.1:47902` on itself.

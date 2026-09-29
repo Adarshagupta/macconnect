@@ -6,25 +6,29 @@
         WindowStartupLocation="CenterScreen"
         UseLayoutRounding="True">
     <Grid>
-        <Image x:Name="FrameImage"
-               Stretch="Uniform"
-               RenderOptions.BitmapScalingMode="Linear"
-               MouseMove="OnMouseMove"
-               MouseDown="OnMouseDown"
-               MouseUp="OnMouseUp"
-               MouseWheel="OnMouseWheel"
-               MouseLeave="OnMouseLeave"/>
-        <Canvas x:Name="CursorLayer"
-                IsHitTestVisible="False"
-                ClipToBounds="True">
-            <Polygon x:Name="MacCursor"
-                     Visibility="Collapsed"
-                     Points="0,0 0,17 4.5,13 7.5,20 10,19 7,12 12.5,12"
-                     Fill="Black"
-                     Stroke="White"
-                     StrokeThickness="1.2"
-                     StrokeLineJoin="Round"/>
-        </Canvas>
+        <!-- The picture and the arrow share this box, so a click lands on the pixel the arrow is touching. -->
+        <Viewbox Stretch="Uniform">
+            <Grid x:Name="Picture" Width="1440" Height="900" Background="Black">
+                <Image x:Name="FrameImage"
+                       Stretch="Fill"
+                       RenderOptions.BitmapScalingMode="Linear"
+                       MouseMove="OnMouseMove"
+                       MouseDown="OnMouseDown"
+                       MouseUp="OnMouseUp"
+                       MouseWheel="OnMouseWheel"
+                       MouseLeave="OnMouseLeave"/>
+                <Canvas IsHitTestVisible="False">
+                    <Polygon x:Name="MacCursor"
+                             Visibility="Collapsed"
+                             Points="0,0 0,17 4.5,13 7.5,20 10,19 7,12 12.5,12"
+                             Fill="Black"
+                             Stroke="White"
+                             StrokeThickness="1"
+                             StrokeLineJoin="Round"
+                             SnapsToDevicePixels="True"/>
+                </Canvas>
+            </Grid>
+        </Viewbox>
         <StackPanel x:Name="WaitingPanel"
                     VerticalAlignment="Center"
                     HorizontalAlignment="Center"

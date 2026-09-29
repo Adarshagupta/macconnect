@@ -113,6 +113,93 @@ enum Socket {
         return fd
     }
 
+    /// Options for a socket the phone opened to us. Same timeouts and send buffer as an outbound viewer connection.
+    static func prepareAccepted(_ fd: Int32) {
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        var noDelay: Int32 = 1
+        setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &noDelay, socklen_t(MemoryLayout<Int32>.size))
+        var sendBuffer: Int32 = 256 * 1024
+        setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sendBuffer, socklen_t(MemoryLayout<Int32>.size))
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags & ~O_NONBLOCK)
+        }
+        setTimeouts(fd, seconds: 6)
+    }
+
+    /// Listens on every IPv4 interface. The socket is non-blocking so the accept loop can keep the watchdog fed.
+    static func listen(port: UInt16) throws -> Int32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        if fd < 0 {
+            throw SocketError.message("Could not open a listen socket: \(errnoText())")
+        }
+        var reuse: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
+        var address = sockaddr_in()
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = port.bigEndian
+        address.sin_addr.s_addr = 0
+
+        let bound = withUnsafePointer(to: &address) { pointer -> Int32 in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                Darwin.bind(fd, generic, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        if bound != 0 {
+            let text = errnoText()
+            Darwin.close(fd)
+            throw SocketError.message("Could not listen on TCP \(port): \(text)")
+        }
+        if Darwin.listen(fd, 8) != 0 {
+            let text = errnoText()
+            Darwin.close(fd)
+            throw SocketError.message("Could not listen on TCP \(port): \(text)")
+        }
+        let flags = fcntl(fd, F_GETFL, 0)
+        if flags >= 0 {
+            _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        }
+        return fd
+    }
+
+    /// Waits up to two seconds for a phone to connect. Returns nil when nobody connects in that time.
+    static func acceptPhone(_ fd: Int32) -> (Int32, String)? {
+        var descriptor = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+        let ready = Darwin.poll(&descriptor, 1, 2_000)
+        Heartbeat.beat()
+        if ready <= 0 {
+            return nil
+        }
+        var address = sockaddr_in()
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let client = withUnsafeMutablePointer(to: &address) { pointer -> Int32 in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                Darwin.accept(fd, generic, &length)
+            }
+        }
+        if client < 0 {
+            return nil
+        }
+        var hostBytes = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        var ip = address.sin_addr
+        if inet_ntop(AF_INET, &ip, &hostBytes, socklen_t(INET_ADDRSTRLEN)) == nil {
+            Darwin.close(client)
+            return nil
+        }
+        let host = String(cString: hostBytes)
+        if host.isEmpty {
+            Darwin.close(client)
+            return nil
+        }
+        prepareAccepted(client)
+        return (client, host)
+    }
+
     static func setTimeouts(_ fd: Int32, seconds: Int) {
         var timeout = timeval(tv_sec: seconds, tv_usec: 0)
         let size = socklen_t(MemoryLayout<timeval>.size)
@@ -128,12 +215,12 @@ enum Socket {
             while got < total {
                 let count = Darwin.read(fd, base.advanced(by: got), total - got)
                 if count == 0 {
-                    throw SocketError.message("The Windows viewer closed the connection")
+                    throw SocketError.message("The viewer closed the connection")
                 }
                 if count < 0 {
                     if errno == EINTR { continue }
                     if errno == EAGAIN || errno == EWOULDBLOCK {
-                        throw SocketError.message("Nothing heard from the Windows viewer for a while")
+                        throw SocketError.message("Nothing heard from the viewer for a while")
                     }
                     throw SocketError.message("Read failed: \(errnoText())")
                 }

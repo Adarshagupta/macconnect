@@ -130,6 +130,7 @@ public partial class MainWindow : Window
         {
             _frameWidth = width;
             _frameHeight = height;
+            MatchPicture(width, height);
             _showing = true;
             PowerRequest.Set(keepDisplayOn: true);
             StatusChanged?.Invoke($"MacConnect — {name}");
@@ -358,6 +359,7 @@ public partial class MainWindow : Window
             }
 
             _frameBitmap.WritePixels(new Int32Rect(0, 0, width, height), pixels, width * 4, 0);
+            MatchPicture(width, height);
             WaitingPanel.Visibility = Visibility.Collapsed;
             return;
         }
@@ -368,6 +370,7 @@ public partial class MainWindow : Window
         }
 
         FrameImage.Source = image;
+        MatchPicture(image.PixelWidth, image.PixelHeight);
         WaitingPanel.Visibility = Visibility.Collapsed;
     }
 
@@ -482,7 +485,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (!TryNormalize(e.GetPosition(FrameImage), out var x, out var y))
+        if (!TryNormalize(e.GetPosition(Picture), out var x, out var y))
         {
             return;
         }
@@ -498,7 +501,7 @@ public partial class MainWindow : Window
     {
         FrameImage.Focus();
         FrameImage.CaptureMouse();
-        if (!TryNormalize(e.GetPosition(FrameImage), out var x, out var y))
+        if (!TryNormalize(e.GetPosition(Picture), out var x, out var y))
         {
             return;
         }
@@ -513,7 +516,7 @@ public partial class MainWindow : Window
 
     private void OnMouseUp(object sender, MouseButtonEventArgs e)
     {
-        var hasPoint = TryNormalize(e.GetPosition(FrameImage), out var x, out var y);
+        var hasPoint = TryNormalize(e.GetPosition(Picture), out var x, out var y);
         SetButton(e.ChangedButton, down: false);
         if (!_leftDown && !_rightDown && !_middleDown)
         {
@@ -538,7 +541,7 @@ public partial class MainWindow : Window
 
     private void OnMouseWheel(object sender, MouseWheelEventArgs e)
     {
-        if (!TryNormalize(e.GetPosition(FrameImage), out var x, out var y))
+        if (!TryNormalize(e.GetPosition(Picture), out var x, out var y))
         {
             return;
         }
@@ -608,56 +611,23 @@ public partial class MainWindow : Window
         _ => Wire.ButtonNone,
     };
 
-    /// Where the Mac picture sits inside the window (the picture keeps its shape, so there can be bars).
-    /// Uses the bitmap that is actually drawn, so a 16:10 Mac on a 16:9 laptop lines the click up with the picture.
-    private bool TryGetContentRect(out double contentX, out double contentY, out double contentWidth, out double contentHeight)
+    /// Sizes the shared picture box to the Mac frame. The arrow and the click both use this box.
+    private void MatchPicture(int width, int height)
     {
-        contentX = 0;
-        contentY = 0;
-        contentWidth = 0;
-        contentHeight = 0;
-        double imageWidth;
-        double imageHeight;
-        if (FrameImage.Source is BitmapSource bitmap && bitmap.PixelWidth > 0 && bitmap.PixelHeight > 0)
+        if (width < 2 || height < 2)
         {
-            imageWidth = bitmap.PixelWidth;
-            imageHeight = bitmap.PixelHeight;
-        }
-        else if (_frameWidth > 0 && _frameHeight > 0)
-        {
-            imageWidth = _frameWidth;
-            imageHeight = _frameHeight;
-        }
-        else
-        {
-            return false;
+            return;
         }
 
-        var controlWidth = FrameImage.ActualWidth;
-        var controlHeight = FrameImage.ActualHeight;
-        if (controlWidth <= 1 || controlHeight <= 1)
+        if (Math.Abs(Picture.Width - width) > 0.5)
         {
-            return false;
+            Picture.Width = width;
         }
 
-        var imageAspect = imageWidth / imageHeight;
-        var controlAspect = controlWidth / controlHeight;
-        if (controlAspect > imageAspect)
+        if (Math.Abs(Picture.Height - height) > 0.5)
         {
-            contentHeight = controlHeight;
-            contentWidth = controlHeight * imageAspect;
-            contentX = (controlWidth - contentWidth) / 2;
-            contentY = 0;
+            Picture.Height = height;
         }
-        else
-        {
-            contentWidth = controlWidth;
-            contentHeight = controlWidth / imageAspect;
-            contentX = 0;
-            contentY = (controlHeight - contentHeight) / 2;
-        }
-
-        return true;
     }
 
     /// Called on the network thread for every Mac pointer position. Only the newest one is drawn.
@@ -712,7 +682,7 @@ public partial class MainWindow : Window
 
     private void DrawPointer(float x, float y)
     {
-        if (!_showing || !TryGetContentRect(out var contentX, out var contentY, out var contentWidth, out var contentHeight))
+        if (!_showing || Picture.Width <= 1 || Picture.Height <= 1)
         {
             return;
         }
@@ -726,27 +696,28 @@ public partial class MainWindow : Window
             MacCursor.Visibility = Visibility.Visible;
         }
 
-        System.Windows.Controls.Canvas.SetLeft(MacCursor, contentX + Math.Clamp(x, 0f, 1f) * contentWidth);
-        System.Windows.Controls.Canvas.SetTop(MacCursor, contentY + Math.Clamp(y, 0f, 1f) * contentHeight);
+        System.Windows.Controls.Canvas.SetLeft(MacCursor, Math.Clamp(x, 0f, 1f) * Picture.Width);
+        System.Windows.Controls.Canvas.SetTop(MacCursor, Math.Clamp(y, 0f, 1f) * Picture.Height);
     }
 
     private bool TryNormalize(Point position, out float x, out float y)
     {
         x = 0;
         y = 0;
-        if (!TryGetContentRect(out var contentX, out var contentY, out var contentWidth, out var contentHeight))
+        var width = Picture.Width;
+        var height = Picture.Height;
+        if (width <= 1 || height <= 1)
         {
             return false;
         }
 
-        if (position.X < contentX || position.Y < contentY ||
-            position.X > contentX + contentWidth || position.Y > contentY + contentHeight)
+        if (position.X < 0 || position.Y < 0 || position.X > width || position.Y > height)
         {
             return false;
         }
 
-        x = (float)((position.X - contentX) / contentWidth);
-        y = (float)((position.Y - contentY) / contentHeight);
+        x = (float)(position.X / width);
+        y = (float)(position.Y / height);
         return true;
     }
 

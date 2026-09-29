@@ -9,6 +9,8 @@ final class Input {
     static let shared = Input()
 
     private let source: CGEventSource?
+    private let gate = NSLock()
+    private var sessionCount = 0
     private var shift = false
     private var control = false
     private var option = false
@@ -30,7 +32,29 @@ final class Input {
         CGAssociateMouseAndMouseCursorPosition(1)
     }
 
+    /// More than one viewer can be connected. Keys are released only when the last one leaves.
+    func beginSession() {
+        gate.lock()
+        sessionCount += 1
+        gate.unlock()
+    }
+
+    func endSession() {
+        gate.lock()
+        sessionCount -= 1
+        let last = sessionCount <= 0
+        if sessionCount < 0 {
+            sessionCount = 0
+        }
+        gate.unlock()
+        if last {
+            releaseAll()
+        }
+    }
+
     func handleMouse(_ payload: Data) {
+        gate.lock()
+        defer { gate.unlock() }
         guard payload.count >= 12 else { return }
         let bytes = [UInt8](payload)
         let action = bytes[0]
@@ -68,6 +92,8 @@ final class Input {
     }
 
     func handleKey(_ payload: Data) {
+        gate.lock()
+        defer { gate.unlock() }
         guard payload.count >= 3 else { return }
         let bytes = [UInt8](payload)
         let virtualKey = UInt16(bytes[0]) | (UInt16(bytes[1]) << 8)
@@ -86,6 +112,8 @@ final class Input {
 
     /// Lets go of everything still held. Called when the connection ends so no key or button stays stuck.
     func releaseAll() {
+        gate.lock()
+        defer { gate.unlock() }
         if leftDown {
             postMouse(type: .leftMouseUp, point: lastPoint, button: .left, clickState: 1)
         }

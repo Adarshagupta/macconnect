@@ -25,6 +25,8 @@ public sealed class H264Decoder : IDisposable
     private readonly int _height;
     private int _codedWidth;
     private int _codedHeight;
+    private int _originX;
+    private int _originY;
 
     public H264Decoder(int width, int height)
     {
@@ -77,7 +79,6 @@ public sealed class H264Decoder : IDisposable
             _transform.GetOutputCurrentType(0, out var type);
             var key = MfNative.FrameSize;
             type.GetUINT64(ref key, out var packed);
-            Marshal.ReleaseComObject(type);
             var codedWidth = (int)((ulong)packed >> 32);
             var codedHeight = (int)((ulong)packed & 0xFFFFFFFF);
             if (codedWidth >= _width && codedHeight >= _height && codedWidth < 16384 && codedHeight < 16384)
@@ -85,10 +86,55 @@ public sealed class H264Decoder : IDisposable
                 _codedWidth = codedWidth;
                 _codedHeight = codedHeight;
             }
+
+            ReadPictureOrigin(type);
+            Marshal.ReleaseComObject(type);
         }
         catch (Exception ex)
         {
             ViewerLog.Write($"Could not read the H.264 output size: {ex.Message}");
+        }
+    }
+
+    /// The decoder pads the frame, and the real picture can start a few pixels in. The arrow is placed on
+    /// the real picture, so the copy has to start at that same corner.
+    private void ReadPictureOrigin(IMFMediaType type)
+    {
+        _originX = 0;
+        _originY = 0;
+        if (TryReadArea(type, MfNative.GeometricAperture, out var x, out var y) ||
+            TryReadArea(type, MfNative.MinimumDisplayAperture, out x, out y))
+        {
+            _originX = x;
+            _originY = y;
+        }
+    }
+
+    private static bool TryReadArea(IMFMediaType type, Guid key, out int x, out int y)
+    {
+        x = 0;
+        y = 0;
+        var blob = Marshal.AllocHGlobal(16);
+        try
+        {
+            type.GetBlob(ref key, blob, 16, out var written);
+            if (written < 16)
+            {
+                return false;
+            }
+
+            // MFVideoArea: two MFOffset values (fraction, integer) then the area size.
+            x = Marshal.ReadInt16(blob, 2);
+            y = Marshal.ReadInt16(blob, 6);
+            return x != 0 || y != 0;
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        finally
+        {
+            Marshal.FreeHGlobal(blob);
         }
     }
 
@@ -325,13 +371,21 @@ public sealed class H264Decoder : IDisposable
             var stride = Math.Max(_codedWidth, width);
             var codedHeight = Math.Max(_codedHeight, height);
             var uvBase = stride * codedHeight;
-            if (current < uvBase + (height / 2) * stride)
+            var originX = _originX;
+            var originY = _originY & ~1;
+            if (originX < 0 || originY < 0 || originX + width > stride || originY + height > codedHeight)
+            {
+                originX = 0;
+                originY = 0;
+            }
+
+            if (current < uvBase + ((originY + height) / 2) * stride)
             {
                 return false;
             }
 
             bgra = new byte[width * height * 4];
-            ConvertNv12((byte*)scan0, stride, uvBase, width, height, bgra);
+            ConvertNv12((byte*)scan0, stride, uvBase, originX, originY, width, height, bgra);
             return true;
         }
         finally
@@ -341,14 +395,14 @@ public sealed class H264Decoder : IDisposable
         }
     }
 
-    private static unsafe void ConvertNv12(byte* source, int stride, int uvBase, int width, int height, byte[] bgra)
+    private static unsafe void ConvertNv12(byte* source, int stride, int uvBase, int originX, int originY, int width, int height, byte[] bgra)
     {
         fixed (byte* destination = bgra)
         {
             for (var y = 0; y < height; y++)
             {
-                var yRow = source + (y * stride);
-                var uvRow = source + uvBase + ((y >> 1) * stride);
+                var yRow = source + ((y + originY) * stride) + originX;
+                var uvRow = source + uvBase + (((y + originY) >> 1) * stride) + (originX & ~1);
                 var dst = destination + (y * width * 4);
                 var x = 0;
                 for (; x + 1 < width; x += 2)
@@ -444,6 +498,8 @@ internal static class MfNative
     public static readonly Guid H264 = new("34363248-0000-0010-8000-00AA00389B71");
     public static readonly Guid CodecLowLatency = new("9C27891A-ED7A-40e1-88E8-B22727A024EE");
     public static readonly Guid Nv12 = new("3231564E-0000-0010-8000-00AA00389B71");
+    public static readonly Guid GeometricAperture = new("66758743-7E5F-400D-980A-AA8596C85696");
+    public static readonly Guid MinimumDisplayAperture = new("D7388766-18FE-48c6-A177-EE894867C8C4");
 
     [DllImport("mfplat.dll", ExactSpelling = true)]
     public static extern int MFStartup(int version, int flags);

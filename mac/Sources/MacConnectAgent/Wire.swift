@@ -4,6 +4,10 @@ import Foundation
 enum Wire {
     static let beaconPort: UInt16 = 47901
     static let tcpPort: UInt16 = 47900
+    /// The phone connects here. Separate from the Windows viewer, which the Mac connects out to.
+    static let phonePort: UInt16 = 47902
+    /// The Mac announces itself here so a phone can find it. Not 47901, so the Mac does not answer its own beacon.
+    static let phoneBeaconPort: UInt16 = 47903
     static let beaconVersion: UInt8 = 1
     static let maxPayload = 8_000_000
 
@@ -33,6 +37,24 @@ enum Wire {
     static let mouseDown: UInt8 = 1
     static let mouseUp: UInt8 = 2
     static let mouseScroll: UInt8 = 3
+
+    /// Same layout as the Windows beacon. The TCP port inside is the phone port, and it is sent to `phoneBeaconPort`.
+    static func phoneBeaconPacket() -> [UInt8] {
+        let nameBytes = Array(computerName.utf8.prefix(200))
+        var packet = [UInt8](repeating: 0, count: 8 + nameBytes.count)
+        packet[0] = 0x4D
+        packet[1] = 0x43
+        packet[2] = 0x31
+        packet[3] = 0x00
+        packet[4] = beaconVersion
+        packet[5] = UInt8(phonePort & 0xff)
+        packet[6] = UInt8((phonePort >> 8) & 0xff)
+        packet[7] = UInt8(nameBytes.count)
+        for (index, byte) in nameBytes.enumerated() {
+            packet[8 + index] = byte
+        }
+        return packet
+    }
 
     static func helloPayload(name: String, width: Int, height: Int) -> Data {
         var payload = Data()

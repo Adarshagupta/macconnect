@@ -54,7 +54,7 @@ final class StayAwake {
         do {
             try process.run()
             self.process = process
-            Log.line("Keeping the Mac awake while Windows is connected")
+            Log.line("Keeping the Mac awake while a viewer is connected")
         } catch {
             Log.line("Could not start caffeinate: \(error.localizedDescription)")
         }
@@ -75,22 +75,51 @@ final class Session {
     private var fd: Int32 = -1
     private var aborted = false
 
+    /// A socket the phone already opened, or -1 when this session still has to connect out (the Windows viewer).
+    private let preconnected: Int32
+
     init(beacon: Beacon) {
         self.beacon = beacon
+        self.preconnected = -1
     }
 
-    /// Connects, streams until the connection ends, and cleans up. Returns true if Windows accepted this Mac.
+    /// The phone connected to us. The rest of the session is the same as a Windows viewer.
+    init(connected fd: Int32, host: String) {
+        let name = host == "127.0.0.1" ? "Phone over USB" : "Phone"
+        self.beacon = Beacon(host: host, port: Wire.phonePort, name: name)
+        self.preconnected = fd
+    }
+
+    /// Stops a phone session so a newer connection can take over.
+    func cancel() {
+        abort()
+    }
+
+    /// Connects, streams until the connection ends, and cleans up. Returns true if the viewer accepted this Mac.
     func run() async throws -> Bool {
-        let target = beacon
-        let connected = try await blocking { try Socket.connect(host: target.host, port: target.port, timeoutMs: 5_000) }
+        let connected: Int32
+        if preconnected >= 0 {
+            Socket.prepareAccepted(preconnected)
+            connected = preconnected
+        } else {
+            let target = beacon
+            connected = try await blocking { try Socket.connect(host: target.host, port: target.port, timeoutMs: 5_000) }
+        }
         setFD(connected)
+        if isAborted {
+            closeSocket()
+            return false
+        }
 
         var capture: DisplayCapture?
         var accepted = false
         var senderStarted = false
+        var joinedInput = false
         let awake = StayAwake()
 
         do {
+            Input.shared.beginSession()
+            joinedInput = true
             let frames = pump
             let prepared = try await withTimeout(seconds: 15, what: "Preparing screen capture") {
                 try await DisplayCapture.prepare { picture in frames.publish(picture) }
@@ -120,7 +149,9 @@ final class Session {
 
         // Cleanup always runs, whatever went wrong above.
         abort()
-        Input.shared.releaseAll()
+        if joinedInput {
+            Input.shared.endSession()
+        }
         awake.stop()
         if senderStarted {
             _ = try? await blocking { self.waitForSenders() }
@@ -219,13 +250,13 @@ final class Session {
             case Wire.ping:
                 try send(type: Wire.pong, payload: Data())
             case Wire.accept:
-                Log.line("Windows accepted this Mac")
+                Log.line("\(beacon.name) accepted this Mac")
                 return
             default:
                 break
             }
         }
-        throw SocketError.message("Windows did not accept this Mac")
+        throw SocketError.message("\(beacon.name) did not accept this Mac")
     }
 
     private func readInput() throws {
@@ -277,7 +308,7 @@ final class Session {
         lock.lock()
         let already = aborted
         aborted = true
-        let current = fd
+        let current = fd >= 0 ? fd : preconnected
         lock.unlock()
         if already { return }
         if current >= 0 {
