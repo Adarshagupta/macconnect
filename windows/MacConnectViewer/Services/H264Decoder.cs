@@ -92,7 +92,9 @@ public sealed class H264Decoder : IDisposable
         }
     }
 
-    public bool TryDecode(byte[] annexB, out byte[] bgra, out int width, out int height)
+    /// With `convert` false the frame still goes through the decoder, so later frames stay correct,
+    /// but no picture is made from it. Converting a picture costs far more than decoding it.
+    public bool TryDecode(byte[] annexB, bool convert, out byte[] bgra, out int width, out int height)
     {
         bgra = Array.Empty<byte>();
         width = _width;
@@ -111,7 +113,7 @@ public sealed class H264Decoder : IDisposable
                 return false;
             }
 
-            return Drain(out bgra, out width, out height);
+            return Drain(convert, out bgra, out width, out height);
         }
         catch (Exception ex)
         {
@@ -208,7 +210,7 @@ public sealed class H264Decoder : IDisposable
         return true;
     }
 
-    private bool Drain(out byte[] bgra, out int width, out int height)
+    private bool Drain(bool convert, out byte[] bgra, out int width, out int height)
     {
         bgra = Array.Empty<byte>();
         width = _width;
@@ -262,7 +264,7 @@ public sealed class H264Decoder : IDisposable
                     continue;
                 }
 
-                if (CopyNv12(sample, _width, _height, out bgra))
+                if (convert && CopyNv12(sample, _width, _height, out bgra))
                 {
                     produced = true;
                 }

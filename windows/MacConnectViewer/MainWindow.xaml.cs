@@ -162,11 +162,11 @@ public partial class MainWindow : Window
         _ = Task.Run(DecodeLoop);
     }
 
-    /// If decoding falls a long way behind, jump to the newest keyframe. Dropping any other picture
-    /// would break the ones after it, which shows up as glitches while things move.
+    /// If decoding falls behind by more than a few frames (about 100 ms), jump to the newest keyframe.
+    /// Dropping any other picture would break the ones after it, which shows up as glitches while things move.
     private void TrimFrameQueue()
     {
-        if (_pendingFrames.Count <= 90)
+        if (_pendingFrames.Count <= 6)
         {
             return;
         }
@@ -237,6 +237,7 @@ public partial class MainWindow : Window
         while (true)
         {
             byte[]? frame;
+            bool newest;
             lock (_frameLock)
             {
                 if (_pendingFrames.Count == 0)
@@ -246,6 +247,7 @@ public partial class MainWindow : Window
                 }
 
                 frame = _pendingFrames.Dequeue();
+                newest = _pendingFrames.Count == 0;
             }
 
             BitmapSource? image = null;
@@ -256,7 +258,7 @@ public partial class MainWindow : Window
             {
                 image = DecodeJpeg(frame);
             }
-            else if (DecodeH264(frame, out pixels, out width, out height))
+            else if (DecodeH264(frame, newest, out pixels, out width, out height))
             {
                 // Pixels are presented on the window thread.
             }
@@ -283,13 +285,14 @@ public partial class MainWindow : Window
         }
     }
 
-    private bool DecodeH264(byte[] frame, out byte[]? pixels, out int width, out int height)
+    /// Only the newest waiting frame is turned into a picture. Older ones are decoded and skipped.
+    private bool DecodeH264(byte[] frame, bool convert, out byte[]? pixels, out int width, out int height)
     {
         pixels = null;
         width = 0;
         height = 0;
         _h264 ??= new H264Decoder(_frameWidth, _frameHeight);
-        if (!_h264.TryDecode(frame, out var bgra, out width, out height))
+        if (!_h264.TryDecode(frame, convert, out var bgra, out width, out height))
         {
             return false;
         }
@@ -502,6 +505,7 @@ public partial class MainWindow : Window
 
         SetButton(e.ChangedButton, down: true);
         Remember(x, y);
+        _lastMoveUtc = DateTime.UtcNow;
         ShowPointer(x, y);
         _ = _session?.SendMouseAsync(Wire.MouseDown, ButtonCode(e.ChangedButton), x, y, 0);
         e.Handled = true;
@@ -685,8 +689,10 @@ public partial class MainWindow : Window
             _cursorQueued = false;
         }
 
-        // While the Windows mouse is over the picture, the arrow is that mouse. That is the point the click sends.
-        if (_pointerInside)
+        // Right after the Windows mouse moves, the arrow stays on the point a click will send, so the Mac's
+        // slightly older position cannot pull it back. Once the Windows mouse is still, the arrow follows
+        // the Mac pointer again, so moving the mouse or trackpad on the Mac still shows up here.
+        if (_pointerInside && DateTime.UtcNow - _lastMoveUtc < TimeSpan.FromMilliseconds(150))
         {
             x = _pointerX;
             y = _pointerY;
