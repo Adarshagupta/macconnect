@@ -20,9 +20,14 @@ public partial class MainWindow : Window
 {
     private SessionService? _session;
     private readonly object _frameLock = new();
-    private byte[]? _pendingJpeg;
+    private byte[]? _pendingFrame;
     private bool _decoding;
     private BitmapSource? _readyImage;
+    private byte[]? _readyPixels;
+    private int _readyWidth;
+    private int _readyHeight;
+    private WriteableBitmap? _frameBitmap;
+    private H264Decoder? _h264;
     private bool _presentQueued;
     private bool _showing;
     private float _cursorX;
@@ -137,11 +142,11 @@ public partial class MainWindow : Window
 
     /// Called for every picture from the Mac, on the network thread. Only the newest waiting picture is
     /// kept, and it is decoded on a background thread so the window never waits on decoding.
-    private void OnFrameReceived(byte[] jpeg)
+    private void OnFrameReceived(byte[] frame)
     {
         lock (_frameLock)
         {
-            _pendingJpeg = jpeg;
+            _pendingFrame = frame;
             if (_decoding)
             {
                 return;
@@ -157,20 +162,31 @@ public partial class MainWindow : Window
     {
         while (true)
         {
-            byte[]? jpeg;
+            byte[]? frame;
             lock (_frameLock)
             {
-                jpeg = _pendingJpeg;
-                _pendingJpeg = null;
-                if (jpeg is null)
+                frame = _pendingFrame;
+                _pendingFrame = null;
+                if (frame is null)
                 {
                     _decoding = false;
                     return;
                 }
             }
 
-            var image = Decode(jpeg);
-            if (image is null)
+            BitmapSource? image = null;
+            byte[]? pixels = null;
+            var width = 0;
+            var height = 0;
+            if (frame.Length >= 2 && frame[0] == 0xFF && frame[1] == 0xD8)
+            {
+                image = DecodeJpeg(frame);
+            }
+            else if (DecodeH264(frame, out pixels, out width, out height))
+            {
+                // Pixels are presented on the window thread.
+            }
+            else
             {
                 continue;
             }
@@ -179,18 +195,36 @@ public partial class MainWindow : Window
             lock (_frameLock)
             {
                 _readyImage = image;
+                _readyPixels = pixels;
+                _readyWidth = width;
+                _readyHeight = height;
                 queue = !_presentQueued;
                 _presentQueued = true;
             }
 
             if (queue)
             {
-                Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(Present));
+                Dispatcher.BeginInvoke(DispatcherPriority.Render, new Action(Present));
             }
         }
     }
 
-    private static BitmapImage? Decode(byte[] jpeg)
+    private bool DecodeH264(byte[] frame, out byte[]? pixels, out int width, out int height)
+    {
+        pixels = null;
+        width = 0;
+        height = 0;
+        _h264 ??= new H264Decoder(_frameWidth, _frameHeight);
+        if (!_h264.TryDecode(frame, out var bgra, out width, out height))
+        {
+            return false;
+        }
+
+        pixels = bgra;
+        return true;
+    }
+
+    private static BitmapImage? DecodeJpeg(byte[] jpeg)
     {
         if (jpeg.Length == 0)
         {
@@ -219,14 +253,39 @@ public partial class MainWindow : Window
     private void Present()
     {
         BitmapSource? image;
+        byte[]? pixels;
+        int width;
+        int height;
         lock (_frameLock)
         {
             image = _readyImage;
+            pixels = _readyPixels;
+            width = _readyWidth;
+            height = _readyHeight;
             _readyImage = null;
+            _readyPixels = null;
             _presentQueued = false;
         }
 
-        if (image is null || !_showing)
+        if (!_showing)
+        {
+            return;
+        }
+
+        if (pixels is not null && width > 0 && height > 0)
+        {
+            if (_frameBitmap is null || _frameBitmap.PixelWidth != width || _frameBitmap.PixelHeight != height)
+            {
+                _frameBitmap = new WriteableBitmap(width, height, 96, 96, System.Windows.Media.PixelFormats.Bgra32, null);
+                FrameImage.Source = _frameBitmap;
+            }
+
+            _frameBitmap.WritePixels(new Int32Rect(0, 0, width, height), pixels, width * 4, 0);
+            WaitingPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        if (image is null)
         {
             return;
         }
@@ -240,6 +299,9 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             _showing = false;
+            _h264?.Dispose();
+            _h264 = null;
+            _frameBitmap = null;
             _cursorSeen = false;
             MacCursor.Visibility = Visibility.Collapsed;
             FrameImage.Cursor = null;

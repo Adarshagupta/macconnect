@@ -69,12 +69,9 @@ final class StayAwake {
 final class Session {
     private let beacon: Beacon
     private let pump = LatestSlot<CVPixelBuffer>()
-    private let encoded = LatestSlot<Data>()
     private let lock = NSLock()
     private let writeLock = NSLock()
     private let senderDone = DispatchSemaphore(value: 0)
-    private let qualityLock = NSLock()
-    private var jpegQuality = 0.85
     private var fd: Int32 = -1
     private var aborted = false
 
@@ -135,41 +132,26 @@ final class Session {
         return accepted
     }
 
-    /// Two threads work side by side: one compresses the newest screen picture while the other sends the
-    /// previous one. Each keeps only the newest item, so nothing queues up. Quality follows the network:
-    /// slow sends lower it, quick sends raise it.
+    /// Encodes and sends the newest picture on one thread. Older pictures are dropped while this runs,
+    /// so a slow frame cannot pile up behind itself.
     private func startSender(capture: DisplayCapture) {
-        let encoder = Thread { [weak self] in
-            guard let self else { return }
-            defer {
-                self.encoded.stop()
-                self.senderDone.signal()
-            }
-            let minimumCycle = 1.0 / 60.0
-            while let picture = self.pump.take() {
-                let cycleStart = ProcessInfo.processInfo.systemUptime
-                if let jpeg = capture.encode(picture, quality: self.currentQuality()) {
-                    self.encoded.publish(jpeg)
-                }
-                // At most about 60 pictures a second, so a busy screen cannot flood the network.
-                let spent = ProcessInfo.processInfo.systemUptime - cycleStart
-                if spent < minimumCycle {
-                    Thread.sleep(forTimeInterval: minimumCycle - spent)
-                }
-            }
-        }
-        encoder.name = "com.macconnect.encode"
-        encoder.qualityOfService = .userInteractive
-
+        let width = capture.width
+        let height = capture.height
         let sender = Thread { [weak self] in
             guard let self else { return }
             defer { self.senderDone.signal() }
-            while let jpeg = self.encoded.take() {
+            let encoder: H264Encoder
+            do {
+                encoder = try H264Encoder(width: width, height: height)
+            } catch {
+                Log.line("\(error)")
+                self.abort()
+                return
+            }
+            while let picture = self.pump.take() {
+                guard let accessUnit = encoder.encode(picture) else { continue }
                 do {
-                    let sendStart = ProcessInfo.processInfo.systemUptime
-                    try self.send(type: Wire.frame, payload: jpeg)
-                    let sendSeconds = ProcessInfo.processInfo.systemUptime - sendStart
-                    self.adjustQuality(sendSeconds: sendSeconds)
+                    try self.send(type: Wire.frame, payload: accessUnit)
                 } catch {
                     Log.line("Could not send a frame: \(error)")
                     self.abort()
@@ -179,8 +161,6 @@ final class Session {
         }
         sender.name = "com.macconnect.frames"
         sender.qualityOfService = .userInteractive
-
-        encoder.start()
         sender.start()
     }
 
@@ -226,33 +206,9 @@ final class Session {
         return (Float(x), Float(y))
     }
 
-    private func currentQuality() -> Double {
-        qualityLock.lock()
-        defer { qualityLock.unlock() }
-        return jpegQuality
-    }
-
-    private func adjustQuality(sendSeconds: Double) {
-        qualityLock.lock()
-        jpegQuality = Session.adjustedQuality(jpegQuality, sendSeconds: sendSeconds)
-        qualityLock.unlock()
-    }
-
-    /// Waits for both picture threads (compress and send) to finish.
+    /// Waits for the picture thread to finish.
     private func waitForSenders() -> DispatchTimeoutResult {
-        _ = senderDone.wait(timeout: .now() + 3)
-        return senderDone.wait(timeout: .now() + 1)
-    }
-
-    private static func adjustedQuality(_ quality: Double, sendSeconds: Double) -> Double {
-        // High quality by default. It only drops (never below 0.5) when a picture takes long to send.
-        if sendSeconds > 0.06 {
-            return max(0.5, quality - 0.05)
-        }
-        if sendSeconds < 0.025 {
-            return min(0.95, quality + 0.02)
-        }
-        return quality
+        senderDone.wait(timeout: .now() + 3)
     }
 
     private func waitForAccept() throws {
@@ -328,7 +284,6 @@ final class Session {
             _ = Darwin.shutdown(current, SHUT_RDWR)
         }
         pump.stop()
-        encoded.stop()
     }
 
     private func closeSocket() {

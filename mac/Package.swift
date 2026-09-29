@@ -12,9 +12,8 @@ let package = Package(
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("CoreVideo"),
-                .linkedFramework("CoreImage"),
+                .linkedFramework("VideoToolbox"),
                 .linkedFramework("CoreGraphics"),
-                .linkedFramework("ImageIO"),
                 .linkedFramework("ApplicationServices"),
             ]
         )

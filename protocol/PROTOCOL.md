@@ -40,7 +40,7 @@ Maximum payload length is 8,000,000 bytes. A larger length closes the connection
 | Value | Name | Sender | Payload |
 | --- | --- | --- | --- |
 | 1 | Hello | Mac | name, capture size |
-| 2 | Frame | Mac | JPEG bytes |
+| 2 | Frame | Mac | One H.264 access unit, Annex B (start codes `00 00 00 01`). Keyframes include SPS and PPS. No B-frames. |
 | 3 | Mouse | Windows | action, button, position, wheel |
 | 4 | Key | Windows | Windows virtual-key, down flag |
 | 5 | Ping | Windows | empty |
@@ -57,11 +57,11 @@ Maximum payload length is 8,000,000 bytes. A larger length closes the connection
 | 2+N | 2 | Capture width in pixels |
 | 4+N | 2 | Capture height in pixels |
 
-Width and height are the JPEG frame size. The viewer uses them for letterboxing. Mouse positions are normalized, so they do not depend on this size.
+Width and height are the picture size. The viewer uses them for letterboxing. Mouse positions are normalized, so they do not depend on this size.
 
 ### Frame payload
 
-Raw JPEG (`image/jpeg`) of one screen frame, including the cursor.
+One H.264 access unit in Annex B. The Mac GPU encodes it with frame reordering off, so a picture is not held back to wait for a later one. The pointer is not in the picture; the viewer draws it from cursor messages.
 
 ### Mouse payload (12 bytes)
 

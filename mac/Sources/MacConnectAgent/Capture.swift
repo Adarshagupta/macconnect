@@ -1,21 +1,16 @@
-import CoreGraphics
-import CoreImage
 import CoreMedia
 import CoreVideo
 import Foundation
-import ImageIO
 import ScreenCaptureKit
 
 /// Captures the main display. ScreenCaptureKit only delivers a picture when something changes, so a
-/// still screen costs nothing. Pictures are handed over raw; `encode` compresses one at the moment the
-/// network is ready for it, so the newest screen is always the one that gets sent.
+/// still screen costs nothing. The newest picture is the one that gets encoded.
 ///
 /// The Mac's own mouse pointer is left out of the picture on purpose. Its position is sent separately
 /// (Session.startCursorSender) and Windows draws it on top, so it moves without waiting for a picture.
 final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "com.macconnect.capture")
-    private let context = CIContext()
     private let onFrame: (CVPixelBuffer) -> Void
     private var onStop: ((String) -> Void)?
     let width: Int
@@ -38,8 +33,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
 
         let longSide = max(display.width, display.height)
-        // Sharper than before: up to 2560 pixels on the long side (was 1920).
-        let scale = min(1.0, 2560.0 / Double(max(longSide, 1)))
+        let scale = min(1.0, 1920.0 / Double(max(longSide, 1)))
         var width = Int((Double(display.width) * scale).rounded(.down))
         var height = Int((Double(display.height) * scale).rounded(.down))
         width = max(2, width - (width % 2))
@@ -53,7 +47,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.showsCursor = false
         // Up to 60 pictures a second are offered. The sender takes only the newest one it can keep up with.
         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
-        configuration.queueDepth = 5
+        configuration.queueDepth = 2
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         return DisplayCapture(filter: filter, configuration: configuration, width: width, height: height, onFrame: onFrame)
@@ -87,30 +81,6 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onStop?(error.localizedDescription)
-    }
-
-    /// Compresses one picture. Safe to call from any thread.
-    func encode(_ pixelBuffer: CVPixelBuffer, quality: Double) -> Data? {
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-
-        // Fast path: Core Image compresses straight from the picture.
-        if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
-            let qualityKey = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
-            if let data = context.jpegRepresentation(of: image, colorSpace: colorSpace, options: [qualityKey: quality]) {
-                return data
-            }
-        }
-
-        // Slower fallback through ImageIO, in case the fast path is not available.
-        guard let cgImage = context.createCGImage(image, from: image.extent) else { return nil }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
-            return nil
-        }
-        let options = [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
-        CGImageDestinationAddImage(destination, cgImage, options)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return data as Data
     }
 
     /// Status frames that carry no new picture.
