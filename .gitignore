@@ -1,0 +1,8 @@
+.DS_Store
+Thumbs.db
+
+windows/**/bin/
+windows/**/obj/
+mac/.build/
+*.user
+*.suo

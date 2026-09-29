@@ -1,0 +1,94 @@
+# MacConnect wire protocol
+
+Home-network protocol between the Mac agent and the Windows viewer. All multi-byte integers and IEEE-754 floats are little-endian.
+
+## Ports
+
+| Port | Protocol | Direction | Purpose |
+| --- | --- | --- | --- |
+| 47901 | UDP | Windows broadcasts, Mac listens | Discovery beacon, once per second |
+| 47900 | TCP | Mac connects to Windows | Desktop frames and input |
+
+## UDP beacon
+
+Sent to the IPv4 broadcast address of each local interface, and to `255.255.255.255`.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 4 | Magic `4D 43 31 00` (`MC1\0`) |
+| 4 | 1 | Version `1` |
+| 5 | 2 | TCP port the viewer is listening on (`47900`) |
+| 7 | 1 | Name length in bytes, 0–200 |
+| 8 | N | UTF-8 Windows computer name |
+
+Packets with a different magic or version are ignored.
+
+## TCP framing
+
+Every TCP message is:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 1 | Message type |
+| 1 | 4 | Payload length in bytes |
+| 5 | N | Payload |
+
+Maximum payload length is 8,000,000 bytes. A larger length closes the connection.
+
+### Types
+
+| Value | Name | Sender | Payload |
+| --- | --- | --- | --- |
+| 1 | Hello | Mac | name, capture size |
+| 2 | Frame | Mac | JPEG bytes |
+| 3 | Mouse | Windows | action, button, position, wheel |
+| 4 | Key | Windows | Windows virtual-key, down flag |
+| 5 | Ping | Windows | empty |
+| 6 | Pong | Mac | empty |
+| 7 | Accept | Windows | empty |
+
+### Hello payload
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 2 | Name length in bytes |
+| 2 | N | UTF-8 Mac computer name |
+| 2+N | 2 | Capture width in pixels |
+| 4+N | 2 | Capture height in pixels |
+
+Width and height are the JPEG frame size. The viewer uses them for letterboxing. Mouse positions are normalized, so they do not depend on this size.
+
+### Frame payload
+
+Raw JPEG (`image/jpeg`) of one screen frame, including the cursor.
+
+### Mouse payload (12 bytes)
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 1 | Action: `0` move, `1` down, `2` up, `3` scroll |
+| 1 | 1 | Button: `0` none, `1` left, `2` right, `3` middle |
+| 2 | 4 | X, float, 0.0–1.0 from the left of the picture |
+| 6 | 4 | Y, float, 0.0–1.0 from the top of the picture |
+| 10 | 2 | Wheel delta, signed. `120` is one scroll line. Zero for non-scroll actions. |
+
+Positions outside 0.0–1.0 are clamped. Clicks that fall in the letterbox bars are not sent.
+
+### Key payload (3 bytes)
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 2 | Windows virtual-key code |
+| 2 | 1 | `1` key down, `0` key up |
+
+The Mac maps these codes to macOS virtual key codes for a US keyboard.
+
+## Session
+
+1. The Mac waits for a beacon, then connects to the advertised TCP port.
+2. The Mac sends Hello.
+3. The Windows viewer allows the Mac name or asks the user. Deny closes the socket.
+4. The viewer sends Accept. The Mac does not send frames before Accept.
+5. The Mac streams frames. If a send is still in progress, older frames are dropped.
+6. The viewer sends Ping about every 2 seconds, including while the allow prompt is open, so the Mac does not give up if the person takes a while to answer. The Mac replies with Pong.
+7. If either side sees no inbound message for 6 seconds, it closes and the Mac tries again.
