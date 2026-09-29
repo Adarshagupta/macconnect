@@ -1,0 +1,19 @@
+name: Build Mac agent
+
+# Compiles the Swift agent on a real Mac in the cloud, so a build error is caught
+# without needing the MacBook. Needs this folder pushed to GitHub.
+on:
+  push:
+  pull_request:
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: swift build -c release
+        working-directory: mac
+      - name: Start check
+        run: .build/release/MacConnectAgent --check
+        working-directory: mac

@@ -12,12 +12,15 @@ function Test-Admin {
     return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# The Mac connects to this PC on TCP 47900. The rule covers every network type (Windows often labels a
+# home network "Public") but only accepts traffic from the local network, never from the internet.
 function Add-MacConnectFirewallRule {
     param([string]$Program)
-    Get-NetFirewallRule -DisplayName 'MacConnect Viewer' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    Get-NetFirewallRule -DisplayName 'MacConnect Viewer Beacon' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-    New-NetFirewallRule -DisplayName 'MacConnect Viewer' -Direction Inbound -Action Allow -Program $Program -Protocol TCP -LocalPort 47900 -Profile Private, Domain | Out-Null
-    New-NetFirewallRule -DisplayName 'MacConnect Viewer Beacon' -Direction Inbound -Action Allow -Program $Program -Protocol UDP -LocalPort 47901 -Profile Private, Domain | Out-Null
+    foreach ($name in 'MacConnect Viewer', 'MacConnect Viewer Beacon') {
+        Get-NetFirewallRule -DisplayName $name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    }
+    New-NetFirewallRule -DisplayName 'MacConnect Viewer' -Direction Inbound -Action Allow `
+        -Program $Program -Protocol TCP -LocalPort 47900 -Profile Any -RemoteAddress LocalSubnet | Out-Null
 }
 
 if ($FirewallOnly) {
@@ -25,23 +28,32 @@ if ($FirewallOnly) {
         throw 'Firewall setup needs the viewer executable path.'
     }
     Add-MacConnectFirewallRule -Program $Exe
-    Write-Host "Allowed MacConnect through the firewall."
+    Write-Host 'Allowed MacConnect through the firewall.'
     exit 0
 }
 
-$dotnet = Join-Path $env:ProgramFiles 'dotnet\dotnet.exe'
+$dotnetCommand = Get-Command dotnet -ErrorAction SilentlyContinue
+$dotnet = if ($dotnetCommand) { $dotnetCommand.Source } else { Join-Path $env:ProgramFiles 'dotnet\dotnet.exe' }
 if (-not (Test-Path $dotnet)) {
-    throw "The .NET 8 SDK is required. Install it from https://dotnet.microsoft.com/download/dotnet/8.0 and run this script again."
+    throw 'The .NET 8 SDK is required. Install it from https://dotnet.microsoft.com/download/dotnet/8.0 and run this script again.'
 }
 
 $root = Split-Path -Parent $PSScriptRoot
 $project = Join-Path $root 'windows\MacConnectViewer\MacConnectViewer.csproj'
 $publish = Join-Path $env:LOCALAPPDATA 'MacConnect\Viewer'
 
+# A running copy locks its own files, so it has to stop before it can be replaced.
+$running = Get-Process -Name 'MacConnectViewer' -ErrorAction SilentlyContinue
+if ($running) {
+    Write-Host 'Stopping the running viewer...'
+    $running | Stop-Process -Force
+    Start-Sleep -Seconds 2
+}
+
 Write-Host "Publishing MacConnect Viewer to $publish"
 & $dotnet publish $project -c Release -o $publish
 if ($LASTEXITCODE -ne 0) {
-    throw 'Publish failed.'
+    throw 'Publish failed. The previous version was left in place if it had been installed.'
 }
 
 $exe = Join-Path $publish 'MacConnectViewer.exe'
@@ -57,7 +69,7 @@ $link.TargetPath = $exe
 $link.WorkingDirectory = $publish
 $link.Description = 'Show a Mac desktop on this PC'
 $link.Save()
-Write-Host "The viewer will start when you sign in to Windows."
+Write-Host 'The viewer will start when you sign in to Windows.'
 
 if (Test-Admin) {
     Add-MacConnectFirewallRule -Program $exe
@@ -67,14 +79,13 @@ if (Test-Admin) {
     $arguments = "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`" -FirewallOnly -Exe `"$exe`""
     $elevated = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru -ArgumentList $arguments
     if ($elevated.ExitCode -ne 0) {
-        Write-Warning 'The firewall rule was not added. Allow MacConnectViewer.exe if Windows asks, or run this script again as administrator.'
+        Write-Warning 'The firewall rule was not added, so the Mac may not be able to connect. Run this script again and approve the administrator prompt.'
     }
 }
 
-$existing = Get-Process -Name 'MacConnectViewer' -ErrorAction SilentlyContinue
-if ($existing) {
-    Stop-Process -Name 'MacConnectViewer' -Force
-    Start-Sleep -Seconds 1
-}
 Start-Process -FilePath $exe
 Write-Host 'MacConnect Viewer is running. Leave this PC on and signed in.'
+Write-Host "This PC's address on your network (useful as a backup, see README):"
+Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+    Where-Object { $_.IPAddress -notlike '169.254.*' -and $_.IPAddress -ne '127.0.0.1' -and $_.PrefixOrigin -ne 'WellKnown' } |
+    ForEach-Object { Write-Host "  $($_.IPAddress)" }

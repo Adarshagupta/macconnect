@@ -1,13 +1,16 @@
+import CoreVideo
 import Darwin
 import Foundation
 
+/// Holds only the newest raw screen picture. Whatever the sender has not picked up yet is replaced,
+/// so a slow network skips old pictures instead of falling behind, and nothing is compressed in vain.
 final class FramePump {
     private let lock = NSLock()
     private let signal = DispatchSemaphore(value: 0)
-    private var latest: Data?
+    private var latest: CVPixelBuffer?
     private var stopped = false
 
-    func publish(_ frame: Data) {
+    func publish(_ frame: CVPixelBuffer) {
         lock.lock()
         let wasEmpty = latest == nil
         latest = frame
@@ -18,7 +21,7 @@ final class FramePump {
         }
     }
 
-    func take() -> Data? {
+    func take() -> CVPixelBuffer? {
         signal.wait()
         lock.lock()
         defer { lock.unlock() }
@@ -38,6 +41,7 @@ final class FramePump {
     }
 }
 
+/// Keeps the Mac from sleeping while Windows is connected. Tied to this process, so it can never be orphaned.
 final class StayAwake {
     private var process: Process?
 
@@ -45,7 +49,7 @@ final class StayAwake {
         guard process == nil else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
-        process.arguments = ["-dimsu"]
+        process.arguments = ["-dims", "-w", String(ProcessInfo.processInfo.processIdentifier)]
         do {
             try process.run()
             self.process = process
@@ -66,73 +70,114 @@ final class Session {
     private let pump = FramePump()
     private let lock = NSLock()
     private let writeLock = NSLock()
+    private let senderDone = DispatchSemaphore(value: 0)
     private var fd: Int32 = -1
-    private var stopped = false
+    private var aborted = false
 
     init(beacon: Beacon) {
         self.beacon = beacon
     }
 
-    func run() async throws {
-        let fd = try Socket.connect(host: beacon.host, port: beacon.port, timeoutMs: 5_000)
-        self.fd = fd
-        defer { closeSocket() }
+    /// Connects, streams until the connection ends, and cleans up. Returns true if Windows accepted this Mac.
+    func run() async throws -> Bool {
+        let target = beacon
+        let connected = try await blocking { try Socket.connect(host: target.host, port: target.port, timeoutMs: 5_000) }
+        setFD(connected)
 
-        let capture = try await DisplayCapture.prepare { [pump] jpeg in
-            pump.publish(jpeg)
-        }
-        try send(type: Wire.hello, payload: Wire.helloPayload(name: Wire.computerName(), width: capture.width, height: capture.height))
-        Log.line("Connected to \(beacon.name) at \(beacon.host):\(beacon.port)")
-        try waitForAccept(fd)
-
+        var capture: DisplayCapture?
+        var accepted = false
+        var senderStarted = false
         let awake = StayAwake()
-        awake.start()
-        defer { awake.stop() }
 
-        try await capture.start { [weak self] reason in
-            Log.line("Capture stopped: \(reason)")
-            self?.closeSocket()
-            self?.pump.stop()
-        }
-        defer {
-            pump.stop()
+        do {
+            let frames = pump
+            let prepared = try await withTimeout(seconds: 15, what: "Preparing screen capture") {
+                try await DisplayCapture.prepare { picture in frames.publish(picture) }
+            }
+            capture = prepared
+
+            try send(type: Wire.hello, payload: Wire.helloPayload(name: Wire.computerName, width: prepared.width, height: prepared.height))
+            Log.line("Connected to \(beacon.name) at \(beacon.host):\(beacon.port)")
+            try await blocking { try self.waitForAccept() }
+            accepted = true
+
+            awake.start()
+            try await withTimeout(seconds: 15, what: "Starting screen capture") {
+                try await prepared.start { [weak self] reason in
+                    Log.line("Capture stopped: \(reason)")
+                    self?.abort()
+                }
+            }
+
+            startSender(capture: prepared)
+            senderStarted = true
+            try await blocking { try self.readInput() }
+        } catch {
+            Log.line("Session ended: \(error)")
         }
 
+        // Cleanup always runs, whatever went wrong above.
+        abort()
+        Input.shared.releaseAll()
+        awake.stop()
+        if senderStarted {
+            let done = senderDone
+            _ = try? await blocking { done.wait(timeout: .now() + 3) }
+        }
+        closeSocket()
+        if let capture {
+            _ = try? await withTimeout(seconds: 5, what: "Stopping screen capture") { await capture.stop() }
+        }
+        return accepted
+    }
+
+    /// Waits for a new picture, compresses the newest one, and sends it. Quality follows the network:
+    /// slow sends lower it, quick sends raise it, so the picture stays current instead of queueing up.
+    private func startSender(capture: DisplayCapture) {
         let sender = Thread { [weak self] in
             guard let self else { return }
-            while let frame = self.pump.take() {
+            defer { self.senderDone.signal() }
+            let minimumCycle = 1.0 / 40.0
+            var quality = 0.6
+            while let picture = self.pump.take() {
+                let cycleStart = ProcessInfo.processInfo.systemUptime
+                guard let jpeg = capture.encode(picture, quality: quality) else { continue }
                 do {
-                    try self.send(type: Wire.frame, payload: frame)
+                    let sendStart = ProcessInfo.processInfo.systemUptime
+                    try self.send(type: Wire.frame, payload: jpeg)
+                    let sendSeconds = ProcessInfo.processInfo.systemUptime - sendStart
+                    quality = Session.adjustedQuality(quality, sendSeconds: sendSeconds)
                 } catch {
                     Log.line("Could not send a frame: \(error)")
-                    self.closeSocket()
-                    self.pump.stop()
+                    self.abort()
                     break
+                }
+                // At most about 40 pictures a second, so a busy screen cannot flood the network.
+                let spent = ProcessInfo.processInfo.systemUptime - cycleStart
+                if spent < minimumCycle {
+                    Thread.sleep(forTimeInterval: minimumCycle - spent)
                 }
             }
         }
         sender.name = "com.macconnect.frames"
+        sender.qualityOfService = .userInteractive
         sender.start()
-
-        defer {
-            pump.stop()
-            closeSocket()
-            while sender.isExecuting {
-                Thread.sleep(forTimeInterval: 0.02)
-            }
-        }
-
-        do {
-            try readInput(fd)
-        } catch {
-            Log.line("Session ended: \(error)")
-        }
-        await capture.stop()
     }
 
-    private func waitForAccept(_ fd: Int32) throws {
-        while !hasStopped() {
-            let message = try Socket.readMessage(fd)
+    private static func adjustedQuality(_ quality: Double, sendSeconds: Double) -> Double {
+        if sendSeconds > 0.045 {
+            return max(0.3, quality - 0.06)
+        }
+        if sendSeconds < 0.015 {
+            return min(0.8, quality + 0.02)
+        }
+        return quality
+    }
+
+    private func waitForAccept() throws {
+        let deadline = Date().addingTimeInterval(600)
+        while Date() < deadline && !isAborted {
+            let message = try Socket.readMessage(currentFD())
             switch message.type {
             case Wire.ping:
                 try send(type: Wire.pong, payload: Data())
@@ -140,15 +185,15 @@ final class Session {
                 Log.line("Windows accepted this Mac")
                 return
             default:
-                Log.line("Ignored message \(message.type) before accept")
+                break
             }
         }
-        throw SocketError.message("Connection closed before Windows accepted this Mac")
+        throw SocketError.message("Windows did not accept this Mac")
     }
 
-    private func readInput(_ fd: Int32) throws {
-        while !hasStopped() {
-            let message = try Socket.readMessage(fd)
+    private func readInput() throws {
+        while !isAborted {
+            let message = try Socket.readMessage(currentFD())
             switch message.type {
             case Wire.ping:
                 try send(type: Wire.pong, payload: Data())
@@ -156,18 +201,16 @@ final class Session {
                 Input.shared.handleMouse(message.payload)
             case Wire.key:
                 Input.shared.handleKey(message.payload)
-            case Wire.pong, Wire.accept:
-                break
             default:
                 break
             }
         }
     }
 
-    private func hasStopped() -> Bool {
+    private var isAborted: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return stopped
+        return aborted
     }
 
     private func currentFD() -> Int32 {
@@ -176,29 +219,43 @@ final class Session {
         return fd
     }
 
+    private func setFD(_ value: Int32) {
+        lock.lock()
+        fd = value
+        lock.unlock()
+    }
+
     private func send(type: UInt8, payload: Data) throws {
         writeLock.lock()
         defer { writeLock.unlock() }
-        let current = currentFD()
-        if current < 0 {
+        if isAborted {
             throw SocketError.message("The connection is closed")
         }
-        try Socket.writeMessage(current, type: type, payload: payload)
+        try Socket.writeMessage(currentFD(), type: type, payload: payload)
+    }
+
+    /// Stops all traffic and wakes any thread blocked on the socket. The descriptor itself is closed
+    /// later by `closeSocket`, once the reader and sender have finished with it.
+    private func abort() {
+        lock.lock()
+        let already = aborted
+        aborted = true
+        let current = fd
+        lock.unlock()
+        if already { return }
+        if current >= 0 {
+            _ = Darwin.shutdown(current, SHUT_RDWR)
+        }
+        pump.stop()
     }
 
     private func closeSocket() {
         lock.lock()
         let current = fd
-        let already = stopped
-        stopped = true
         fd = -1
         lock.unlock()
         if current >= 0 {
-            _ = shutdown(current, SHUT_RDWR)
             Darwin.close(current)
-        }
-        if !already {
-            pump.stop()
         }
     }
 }

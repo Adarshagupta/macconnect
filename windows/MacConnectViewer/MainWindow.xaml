@@ -8,7 +8,7 @@
     <Grid>
         <Image x:Name="FrameImage"
                Stretch="Uniform"
-               RenderOptions.BitmapScalingMode="HighQuality"
+               RenderOptions.BitmapScalingMode="Linear"
                MouseMove="OnMouseMove"
                MouseDown="OnMouseDown"
                MouseUp="OnMouseUp"
@@ -26,6 +26,11 @@
                        Margin="0,12,0,0"
                        FontSize="16"
                        Foreground="#FFB0B0B0"
+                       HorizontalAlignment="Center"/>
+            <TextBlock x:Name="AddressText"
+                       Margin="0,24,0,0"
+                       FontSize="16"
+                       Foreground="#FF80B0FF"
                        HorizontalAlignment="Center"/>
         </StackPanel>
     </Grid>

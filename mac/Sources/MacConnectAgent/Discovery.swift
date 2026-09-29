@@ -7,55 +7,64 @@ struct Beacon {
     var name: String
 }
 
+/// Listens for the Windows viewer's once-a-second broadcast.
 final class Discovery {
-    private var fd: Int32
+    private let fd: Int32
 
-    init() throws {
-        fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+    private init(fd: Int32) {
+        self.fd = fd
+    }
+
+    deinit {
+        Darwin.close(fd)
+    }
+
+    /// Returns nil (and logs why) if the port cannot be used. The agent keeps working through saved addresses.
+    static func make() -> Discovery? {
+        let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         if fd < 0 {
-            throw SocketError.message("Could not open the discovery socket: \(errnoText())")
+            Log.line("Could not open the discovery socket: \(errnoText())")
+            return nil
         }
         var reuse: Int32 = 1
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+        setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &reuse, socklen_t(MemoryLayout<Int32>.size))
 
         var address = sockaddr_in()
         address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
         address.sin_family = sa_family_t(AF_INET)
         address.sin_port = Wire.beaconPort.bigEndian
-        address.sin_addr.s_addr = in_addr_t(INADDR_ANY)
+        address.sin_addr.s_addr = 0
 
-        let bound = withUnsafePointer(to: &address) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+        let bound = withUnsafePointer(to: &address) { pointer -> Int32 in
+            pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                Darwin.bind(fd, generic, socklen_t(MemoryLayout<sockaddr_in>.size))
             }
         }
         if bound != 0 {
-            let failed = fd
-            fd = -1
-            Darwin.close(failed)
-            throw SocketError.message("Could not listen for the Windows PC on UDP \(Wire.beaconPort): \(errnoText())")
+            Log.line("Could not listen for the Windows PC on UDP \(Wire.beaconPort): \(errnoText())")
+            Darwin.close(fd)
+            return nil
         }
         Socket.setTimeouts(fd, seconds: 2)
+        return Discovery(fd: fd)
     }
 
-    deinit {
-        if fd >= 0 {
-            Darwin.close(fd)
-        }
-    }
-
+    /// Waits up to two seconds for one beacon.
     func next() -> Beacon? {
         var buffer = [UInt8](repeating: 0, count: 512)
         var sender = sockaddr_in()
-        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-        let received = buffer.withUnsafeMutableBytes { raw -> Int in
+        var senderLength = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let capacity = buffer.count
+        let received = buffer.withUnsafeMutableBytes { (raw: UnsafeMutableRawBufferPointer) -> Int in
             guard let base = raw.baseAddress else { return -1 }
-            return withUnsafeMutablePointer(to: &sender) { pointer in
-                pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sock in
-                    recvfrom(fd, base, raw.count, 0, sock, &length)
+            return withUnsafeMutablePointer(to: &sender) { senderPointer -> Int in
+                senderPointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { generic in
+                    Darwin.recvfrom(fd, base, capacity, 0, generic, &senderLength)
                 }
             }
         }
+        Heartbeat.beat()
         if received < 8 {
             return nil
         }
@@ -67,36 +76,23 @@ final class Discovery {
         }
         let port = UInt16(buffer[5]) | (UInt16(buffer[6]) << 8)
         let nameLength = Int(buffer[7])
-        guard nameLength >= 0, received >= 8 + nameLength, port > 0 else {
+        if port == 0 || received < 8 + nameLength {
             return nil
         }
         let nameData = Data(buffer[8..<(8 + nameLength)])
-        let name = String(data: nameData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        var hostBytes = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
-        let converted = hostBytes.withUnsafeMutableBufferPointer { pointer -> Bool in
-            var address = sender.sin_addr
-            return inet_ntop(AF_INET, &address, pointer.baseAddress, socklen_t(INET_ADDRSTRLEN)) != nil
-        }
-        guard converted else { return nil }
-        let host = hostBytes.withUnsafeBufferPointer { buffer -> String in
-            guard let base = buffer.baseAddress else { return "" }
-            return String(cString: base)
-        }
-        guard !host.isEmpty else { return nil }
-        let displayName = if let name, !name.isEmpty { name } else { "Windows" }
-        return Beacon(host: host, port: port, name: displayName)
-    }
-}
+        let decoded = String(data: nameData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let name = decoded.isEmpty ? "Windows" : decoded
 
-extension Discovery {
-    static func listen() async -> Discovery {
-        while true {
-            do {
-                return try Discovery()
-            } catch {
-                Log.line("\(error)")
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
-            }
+        var hostBytes = [CChar](repeating: 0, count: Int(INET_ADDRSTRLEN))
+        var address = sender.sin_addr
+        let converted = inet_ntop(AF_INET, &address, &hostBytes, socklen_t(INET_ADDRSTRLEN)) != nil
+        if !converted {
+            return nil
         }
+        let host = String(cString: hostBytes)
+        if host.isEmpty || host.hasPrefix("127.") {
+            return nil
+        }
+        return Beacon(host: host, port: port, name: name)
     }
 }

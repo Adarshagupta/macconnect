@@ -85,10 +85,11 @@ The Mac maps these codes to macOS virtual key codes for a US keyboard.
 
 ## Session
 
-1. The Mac waits for a beacon, then connects to the advertised TCP port.
+1. The Mac waits for a beacon, then connects to the advertised TCP port. If no beacon is heard, it tries a saved Windows address (from `config.json` or the last beacon it heard) on the same TCP port.
 2. The Mac sends Hello.
-3. The Windows viewer allows the Mac name or asks the user. Deny closes the socket.
+3. The Windows viewer allows the Mac name or asks the user. Deny closes the socket, and the same name is not asked about again for 60 seconds.
 4. The viewer sends Accept. The Mac does not send frames before Accept.
 5. The Mac streams frames. If a send is still in progress, older frames are dropped.
 6. The viewer sends Ping about every 2 seconds, including while the allow prompt is open, so the Mac does not give up if the person takes a while to answer. The Mac replies with Pong.
-7. If either side sees no inbound message for 6 seconds, it closes and the Mac tries again.
+7. Once Hello has been received, either side that sees no inbound message for 6 seconds closes the connection and the Mac tries again. Before Hello, the viewer waits up to 20 seconds.
+8. The viewer handles each connection separately. When a Mac that is already accepted connects again, the new connection is accepted as soon as it is approved and the old one is closed. This way a stale or half-open connection can never keep the Mac out.

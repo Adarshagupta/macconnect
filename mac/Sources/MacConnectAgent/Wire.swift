@@ -30,11 +30,12 @@ enum Wire {
         return payload
     }
 
-    static func computerName() -> String {
+    /// The name Windows remembers this Mac by. It is read once so it stays the same for the whole run.
+    static let computerName: String = {
         let name = Host.current().localizedName ?? ProcessInfo.processInfo.hostName
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "Mac" : trimmed
-    }
+    }()
 
     private static func appendUInt16(_ value: UInt16, to data: inout Data) {
         data.append(UInt8(value & 0xff))
@@ -45,18 +46,4 @@ enum Wire {
 struct Message {
     var type: UInt8
     var payload: Data
-}
-
-enum Log {
-    private static let formatter: DateFormatter = {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss"
-        return formatter
-    }()
-
-    static func line(_ message: String) {
-        let text = "\(formatter.string(from: Date())) \(message)\n"
-        fputs(text, stderr)
-        fflush(stderr)
-    }
 }

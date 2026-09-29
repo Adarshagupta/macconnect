@@ -6,25 +6,31 @@ import Foundation
 import ImageIO
 import ScreenCaptureKit
 
+/// Captures the main display. ScreenCaptureKit only delivers a picture when something changes, so a
+/// still screen costs nothing. Pictures are handed over raw; `encode` compresses one at the moment the
+/// network is ready for it, so the newest screen is always the one that gets sent.
+///
+/// The Mac's own mouse pointer is left out of the picture on purpose. The Windows pointer is drawn
+/// locally and moves instantly, so the pointer never lags behind the hand.
 final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
-    private let stream: SCStream
+    private var stream: SCStream?
     private let queue = DispatchQueue(label: "com.macconnect.capture")
-    private let context = CIContext(options: [.useSoftwareRenderer: false])
-    private let onFrame: (Data) -> Void
+    private let context = CIContext()
+    private let onFrame: (CVPixelBuffer) -> Void
     private var onStop: ((String) -> Void)?
-    private var lastFrame = 0.0
     let width: Int
     let height: Int
 
-    private init(stream: SCStream, width: Int, height: Int, onFrame: @escaping (Data) -> Void) {
-        self.stream = stream
+    private init(filter: SCContentFilter, configuration: SCStreamConfiguration, width: Int, height: Int, onFrame: @escaping (CVPixelBuffer) -> Void) {
         self.width = width
         self.height = height
         self.onFrame = onFrame
         super.init()
+        // SCStream only accepts its delegate at creation time, so it is built after `self` exists.
+        self.stream = SCStream(filter: filter, configuration: configuration, delegate: self)
     }
 
-    static func prepare(onFrame: @escaping (Data) -> Void) async throws -> DisplayCapture {
+    static func prepare(onFrame: @escaping (CVPixelBuffer) -> Void) async throws -> DisplayCapture {
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID }) ?? content.displays.first else {
@@ -42,18 +48,20 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         configuration.width = width
         configuration.height = height
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        configuration.showsCursor = true
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 20)
-        configuration.queueDepth = 3
+        configuration.colorSpaceName = CGColorSpace.sRGB
+        configuration.showsCursor = false
+        // Up to 60 pictures a second are offered. The sender takes only the newest one it can keep up with.
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+        configuration.queueDepth = 5
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
-        let stream = SCStream(filter: filter, configuration: configuration, delegate: nil)
-        let capture = DisplayCapture(stream: stream, width: width, height: height, onFrame: onFrame)
-        stream.delegate = capture
-        return capture
+        return DisplayCapture(filter: filter, configuration: configuration, width: width, height: height, onFrame: onFrame)
     }
 
     func start(onStop: @escaping (String) -> Void) async throws {
+        guard let stream else {
+            throw SocketError.message("The capture stream was not created")
+        }
         self.onStop = onStop
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
@@ -61,6 +69,7 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     func stop() async {
+        guard let stream else { return }
         do {
             try await stream.stopCapture()
         } catch {
@@ -68,45 +77,48 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
 
-    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen, CMSampleBufferIsValid(sampleBuffer), let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
-            return
-        }
-        if isBlank(sampleBuffer) {
-            return
-        }
-        let now = CFAbsoluteTimeGetCurrent()
-        if now - lastFrame < 0.045 {
-            return
-        }
-        lastFrame = now
-        guard let jpeg = jpegData(from: pixelBuffer) else { return }
-        onFrame(jpeg)
+    func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        guard type == .screen, CMSampleBufferIsValid(sampleBuffer) else { return }
+        if isEmptyFrame(sampleBuffer) { return }
+        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        onFrame(pixelBuffer)
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         onStop?(error.localizedDescription)
     }
 
-    private func isBlank(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    /// Compresses one picture. Safe to call from any thread.
+    func encode(_ pixelBuffer: CVPixelBuffer, quality: Double) -> Data? {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+
+        // Fast path: Core Image compresses straight from the picture.
+        if let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) {
+            let qualityKey = CIImageRepresentationOption(rawValue: kCGImageDestinationLossyCompressionQuality as String)
+            if let data = context.jpegRepresentation(of: image, colorSpace: colorSpace, options: [qualityKey: quality]) {
+                return data
+            }
+        }
+
+        // Slower fallback through ImageIO, in case the fast path is not available.
+        guard let cgImage = context.createCGImage(image, from: image.extent) else { return nil }
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data as CFMutableData, "public.jpeg" as CFString, 1, nil) else {
+            return nil
+        }
+        let options = [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary
+        CGImageDestinationAddImage(destination, cgImage, options)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        return data as Data
+    }
+
+    /// Status frames that carry no new picture.
+    private func isEmptyFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int,
               let status = SCFrameStatus(rawValue: raw) else {
             return false
         }
         return status == .idle || status == .blank
-    }
-
-    private func jpegData(from pixelBuffer: CVPixelBuffer) -> Data? {
-        let image = CIImage(cvPixelBuffer: pixelBuffer)
-        guard let cgImage = context.createCGImage(image, from: image.extent) else { return nil }
-        let data = NSMutableData()
-        guard let destination = CGImageDestinationCreateWithData(data, "public.jpeg" as CFString, 1, nil) else {
-            return nil
-        }
-        let options = [kCGImageDestinationLossyCompressionQuality: 0.6] as CFDictionary
-        CGImageDestinationAddImage(destination, cgImage, options)
-        guard CGImageDestinationFinalize(destination) else { return nil }
-        return data as Data
     }
 }

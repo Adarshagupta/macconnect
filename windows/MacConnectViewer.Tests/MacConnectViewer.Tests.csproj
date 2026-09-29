@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>MacConnectViewer.Tests</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="..\MacConnectViewer\Protocol\Wire.cs" Link="Wire.cs" />
+    <Compile Include="..\MacConnectViewer\Services\SessionService.cs" Link="SessionService.cs" />
+    <Compile Include="..\MacConnectViewer\Services\AllowListStore.cs" Link="AllowListStore.cs" />
+    <Compile Include="..\MacConnectViewer\Services\ViewerLog.cs" Link="ViewerLog.cs" />
+  </ItemGroup>
+</Project>

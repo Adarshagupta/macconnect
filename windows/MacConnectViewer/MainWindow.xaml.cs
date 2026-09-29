@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseButton = System.Windows.Input.MouseButton;
 using MouseButtonEventArgs = System.Windows.Input.MouseButtonEventArgs;
@@ -18,8 +19,12 @@ namespace MacConnectViewer;
 public partial class MainWindow : Window
 {
     private SessionService? _session;
-    private byte[]? _pendingFrame;
-    private bool _renderQueued;
+    private readonly object _frameLock = new();
+    private byte[]? _pendingJpeg;
+    private bool _decoding;
+    private BitmapSource? _readyImage;
+    private bool _presentQueued;
+    private bool _showing;
     private int _frameWidth;
     private int _frameHeight;
     private bool _userShrunk;
@@ -30,6 +35,7 @@ public partial class MainWindow : Window
     private float _lastX;
     private float _lastY;
     private bool _hasPoint;
+    private readonly HashSet<ushort> _keysDown = new();
     private DateTime _lastMoveUtc = DateTime.MinValue;
 
     public event Action<string>? StatusChanged;
@@ -37,8 +43,10 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        AddressText.Text = NetworkInfo.Describe();
         PreviewKeyDown += OnPreviewKeyDown;
         PreviewKeyUp += OnPreviewKeyUp;
+        Deactivated += (_, _) => ReleaseAllInput();
     }
 
     public void Attach(SessionService session)
@@ -108,6 +116,8 @@ public partial class MainWindow : Window
         {
             _frameWidth = width;
             _frameHeight = height;
+            _showing = true;
+            PowerRequest.Set(keepDisplayOn: true);
             StatusChanged?.Invoke($"MacConnect — {name}");
             Show();
             if (!_userShrunk)
@@ -119,46 +129,66 @@ public partial class MainWindow : Window
         });
     }
 
+    /// Called for every picture from the Mac, on the network thread. Only the newest waiting picture is
+    /// kept, and it is decoded on a background thread so the window never waits on decoding.
     private void OnFrameReceived(byte[] jpeg)
     {
-        lock (this)
+        lock (_frameLock)
         {
-            _pendingFrame = jpeg;
-            if (_renderQueued)
+            _pendingJpeg = jpeg;
+            if (_decoding)
             {
                 return;
             }
 
-            _renderQueued = true;
+            _decoding = true;
         }
 
-        Dispatcher.BeginInvoke(RenderPendingFrame);
+        _ = Task.Run(DecodeLoop);
     }
 
-    private void OnDisconnected()
+    private void DecodeLoop()
     {
-        Dispatcher.BeginInvoke(() =>
+        while (true)
         {
-            FrameImage.Source = null;
-            WaitingPanel.Visibility = Visibility.Visible;
-            ReleaseButtons();
-            StatusChanged?.Invoke("MacConnect — waiting for Mac");
-        });
-    }
+            byte[]? jpeg;
+            lock (_frameLock)
+            {
+                jpeg = _pendingJpeg;
+                _pendingJpeg = null;
+                if (jpeg is null)
+                {
+                    _decoding = false;
+                    return;
+                }
+            }
 
-    private void RenderPendingFrame()
-    {
-        byte[]? jpeg;
-        lock (this)
-        {
-            jpeg = _pendingFrame;
-            _pendingFrame = null;
-            _renderQueued = false;
+            var image = Decode(jpeg);
+            if (image is null)
+            {
+                continue;
+            }
+
+            bool queue;
+            lock (_frameLock)
+            {
+                _readyImage = image;
+                queue = !_presentQueued;
+                _presentQueued = true;
+            }
+
+            if (queue)
+            {
+                Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(Present));
+            }
         }
+    }
 
-        if (jpeg is null || jpeg.Length == 0)
+    private static BitmapImage? Decode(byte[] jpeg)
+    {
+        if (jpeg.Length == 0)
         {
-            return;
+            return null;
         }
 
         try
@@ -170,13 +200,51 @@ public partial class MainWindow : Window
             image.StreamSource = stream;
             image.EndInit();
             image.Freeze();
-            FrameImage.Source = image;
-            WaitingPanel.Visibility = Visibility.Collapsed;
+            return image;
         }
         catch (Exception ex)
         {
-            ViewerLog.Write($"Could not show a frame: {ex.Message}");
+            ViewerLog.Write($"Could not decode a frame: {ex.Message}");
+            return null;
         }
+    }
+
+    /// Runs on the window thread: shows the newest decoded picture and skips any older one.
+    private void Present()
+    {
+        BitmapSource? image;
+        lock (_frameLock)
+        {
+            image = _readyImage;
+            _readyImage = null;
+            _presentQueued = false;
+        }
+
+        if (image is null || !_showing)
+        {
+            return;
+        }
+
+        FrameImage.Source = image;
+        WaitingPanel.Visibility = Visibility.Collapsed;
+    }
+
+    private void OnDisconnected()
+    {
+        Dispatcher.BeginInvoke(() =>
+        {
+            _showing = false;
+            FrameImage.Source = null;
+            AddressText.Text = NetworkInfo.Describe();
+            WaitingPanel.Visibility = Visibility.Visible;
+            _keysDown.Clear();
+            _leftDown = false;
+            _rightDown = false;
+            _middleDown = false;
+            FrameImage.ReleaseMouseCapture();
+            PowerRequest.Set(keepDisplayOn: false);
+            StatusChanged?.Invoke("MacConnect — waiting for Mac");
+        });
     }
 
     private void LeaveFullScreen()
@@ -206,6 +274,12 @@ public partial class MainWindow : Window
 
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var virtualKey = (ushort)KeyInterop.VirtualKeyFromKey(key);
+        if (virtualKey == 0)
+        {
+            return;
+        }
+
+        _keysDown.Add(virtualKey);
         _ = _session.SendKeyAsync(virtualKey, down: true);
         e.Handled = IsFullScreen;
     }
@@ -219,8 +293,27 @@ public partial class MainWindow : Window
 
         var key = e.Key == Key.System ? e.SystemKey : e.Key;
         var virtualKey = (ushort)KeyInterop.VirtualKeyFromKey(key);
-        _ = _session.SendKeyAsync(virtualKey, down: false);
-        e.Handled = IsFullScreen;
+
+        // Only release keys the Mac saw go down. Esc that shrank the window never reached the Mac.
+        if (_keysDown.Remove(virtualKey))
+        {
+            _ = _session.SendKeyAsync(virtualKey, down: false);
+            e.Handled = IsFullScreen;
+        }
+    }
+
+    private void ReleaseAllInput()
+    {
+        if (_session is not null)
+        {
+            foreach (var virtualKey in _keysDown)
+            {
+                _ = _session.SendKeyAsync(virtualKey, down: false);
+            }
+        }
+
+        _keysDown.Clear();
+        ReleaseButtons();
     }
 
     private void OnMouseMove(object sender, MouseEventArgs e)
@@ -230,7 +323,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (DateTime.UtcNow - _lastMoveUtc < TimeSpan.FromMilliseconds(16))
+        if (DateTime.UtcNow - _lastMoveUtc < TimeSpan.FromMilliseconds(8))
         {
             return;
         }
