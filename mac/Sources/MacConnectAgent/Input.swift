@@ -26,6 +26,8 @@ final class Input {
     private init() {
         source = CGEventSource(stateID: .hidSystemState)
         source?.localEventsSuppressionInterval = 0
+        // Keep the cursor and the click on the same point. Without this they drift apart.
+        CGAssociateMouseAndMouseCursorPosition(1)
     }
 
     func handleMouse(_ payload: Data) {
@@ -109,6 +111,7 @@ final class Input {
 
     private func move(to point: CGPoint) {
         CGWarpMouseCursorPosition(point)
+        CGAssociateMouseAndMouseCursorPosition(1)
         let type: CGEventType
         let button: CGMouseButton
         if leftDown {
@@ -131,6 +134,11 @@ final class Input {
         guard let event = CGEvent(mouseEventSource: source, mouseType: type, mouseCursorPosition: point, mouseButton: button) else {
             return
         }
+        // The position is absolute. A leftover movement distance gets added on again and the
+        // click lands away from the pointer, especially on a Retina display.
+        event.location = point
+        event.setIntegerValueField(.mouseEventDeltaX, value: 0)
+        event.setIntegerValueField(.mouseEventDeltaY, value: 0)
         if clickState > 0 {
             event.setIntegerValueField(.mouseEventClickState, value: clickState)
         }

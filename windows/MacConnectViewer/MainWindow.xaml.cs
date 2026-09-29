@@ -34,6 +34,9 @@ public partial class MainWindow : Window
     private float _cursorY;
     private bool _cursorQueued;
     private bool _cursorSeen;
+    private bool _pointerInside;
+    private float _pointerX;
+    private float _pointerY;
     private int _frameWidth;
     private int _frameHeight;
     private bool _userShrunk;
@@ -375,6 +378,7 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(() =>
         {
             _showing = false;
+            _pointerInside = false;
             _h264?.Dispose();
             _h264 = null;
             _frameBitmap = null;
@@ -482,6 +486,7 @@ public partial class MainWindow : Window
 
         _lastMoveUtc = DateTime.UtcNow;
         Remember(x, y);
+        ShowPointer(x, y);
         var button = _leftDown ? Wire.ButtonLeft : _rightDown ? Wire.ButtonRight : _middleDown ? Wire.ButtonMiddle : Wire.ButtonNone;
         _ = _session.SendMouseAsync(Wire.MouseMove, button, x, y, 0);
     }
@@ -497,6 +502,7 @@ public partial class MainWindow : Window
 
         SetButton(e.ChangedButton, down: true);
         Remember(x, y);
+        ShowPointer(x, y);
         _ = _session?.SendMouseAsync(Wire.MouseDown, ButtonCode(e.ChangedButton), x, y, 0);
         e.Handled = true;
     }
@@ -539,7 +545,9 @@ public partial class MainWindow : Window
 
     private void OnMouseLeave(object sender, MouseEventArgs e)
     {
+        _pointerInside = false;
         ReleaseButtons();
+        UpdateCursor();
     }
 
     private void ReleaseButtons()
@@ -597,13 +605,26 @@ public partial class MainWindow : Window
     };
 
     /// Where the Mac picture sits inside the window (the picture keeps its shape, so there can be bars).
+    /// Uses the bitmap that is actually drawn, so a 16:10 Mac on a 16:9 laptop lines the click up with the picture.
     private bool TryGetContentRect(out double contentX, out double contentY, out double contentWidth, out double contentHeight)
     {
         contentX = 0;
         contentY = 0;
         contentWidth = 0;
         contentHeight = 0;
-        if (_frameWidth <= 0 || _frameHeight <= 0)
+        double imageWidth;
+        double imageHeight;
+        if (FrameImage.Source is BitmapSource bitmap && bitmap.PixelWidth > 0 && bitmap.PixelHeight > 0)
+        {
+            imageWidth = bitmap.PixelWidth;
+            imageHeight = bitmap.PixelHeight;
+        }
+        else if (_frameWidth > 0 && _frameHeight > 0)
+        {
+            imageWidth = _frameWidth;
+            imageHeight = _frameHeight;
+        }
+        else
         {
             return false;
         }
@@ -615,7 +636,7 @@ public partial class MainWindow : Window
             return false;
         }
 
-        var imageAspect = _frameWidth / (double)_frameHeight;
+        var imageAspect = imageWidth / imageHeight;
         var controlAspect = controlWidth / controlHeight;
         if (controlAspect > imageAspect)
         {
@@ -664,6 +685,27 @@ public partial class MainWindow : Window
             _cursorQueued = false;
         }
 
+        // While the Windows mouse is over the picture, the arrow is that mouse. That is the point the click sends.
+        if (_pointerInside)
+        {
+            x = _pointerX;
+            y = _pointerY;
+        }
+
+        DrawPointer(x, y);
+    }
+
+    /// Puts the arrow on the spot that a click at this normalized position will hit.
+    private void ShowPointer(float x, float y)
+    {
+        _pointerInside = true;
+        _pointerX = x;
+        _pointerY = y;
+        DrawPointer(x, y);
+    }
+
+    private void DrawPointer(float x, float y)
+    {
         if (!_showing || !TryGetContentRect(out var contentX, out var contentY, out var contentWidth, out var contentHeight))
         {
             return;
