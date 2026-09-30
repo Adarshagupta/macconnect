@@ -373,14 +373,21 @@ public sealed class H264Decoder : IDisposable
             var uvBase = stride * codedHeight;
             var originX = _originX;
             var originY = _originY & ~1;
-            if (originX < 0 || originY < 0 || originX + width > stride || originY + height > codedHeight)
+            if (originX < 0 || originY < 0 || originX + width > stride || originY + height > codedHeight ||
+                current < uvBase + ((originY + height) / 2) * stride)
             {
                 originX = 0;
                 originY = 0;
             }
 
-            if (current < uvBase + ((originY + height) / 2) * stride)
+            if (current < uvBase + (height / 2) * stride)
             {
+                if (!_logged)
+                {
+                    _logged = true;
+                    ViewerLog.Write($"H.264 picture was too small to show ({current} bytes for {width}x{height}, stride {stride})");
+                }
+
                 return false;
             }
 

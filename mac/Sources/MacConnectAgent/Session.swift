@@ -45,8 +45,10 @@ final class LatestSlot<Item> {
 /// Keeps the Mac from sleeping while Windows is connected. Tied to this process, so it can never be orphaned.
 final class StayAwake {
     private var process: Process?
+    private var waking = false
 
     func start() {
+        waking = true
         guard process == nil else { return }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
@@ -58,11 +60,34 @@ final class StayAwake {
         } catch {
             Log.line("Could not start caffeinate: \(error.localizedDescription)")
         }
+        wakeDisplay()
+        Thread.detachNewThread {
+            while self.waking {
+                Thread.sleep(forTimeInterval: 15)
+                if self.waking {
+                    self.wakeDisplay()
+                }
+            }
+        }
     }
 
     func stop() {
+        waking = false
         process?.terminate()
         process = nil
+    }
+
+    /// Turns the panel on. A cracked screen still has a picture in memory, but macOS stops drawing it
+    /// once the display sleeps, and then Windows only receives the pointer.
+    func wakeDisplay() {
+        let wake = Process()
+        wake.executableURL = URL(fileURLWithPath: "/usr/bin/caffeinate")
+        wake.arguments = ["-u", "-t", "2"]
+        do {
+            try wake.run()
+        } catch {
+            Log.line("Could not wake the display: \(error.localizedDescription)")
+        }
     }
 }
 

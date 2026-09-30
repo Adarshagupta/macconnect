@@ -10,6 +10,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
+import android.os.Looper
 import android.view.Surface
 import android.view.WindowManager
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -31,6 +32,7 @@ class MacConnectPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activit
     private var multicastLock: WifiManager.MulticastLock? = null
     private val thread = HandlerThread("macconnect-h264").also { it.start() }
     private val handler = Handler(thread.looper)
+    private val main = Handler(Looper.getMainLooper())
     private var producer: TextureRegistry.SurfaceProducer? = null
     private var codec: MediaCodec? = null
     private var presentationTimeUs = 0L
@@ -117,22 +119,14 @@ class MacConnectPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activit
                         producer = created
                         result.success(created.id())
                     } catch (error: Exception) {
-                        try {
-                            created.release()
-                        } catch (_: Exception) {
-                        }
-                        if (producer === created) producer = null
-                        codec?.let {
-                            try {
-                                it.stop()
-                            } catch (_: Exception) {
-                            }
-                            try {
-                                it.release()
-                            } catch (_: Exception) {
-                            }
-                        }
+                        producer = null
                         codec = null
+                        main.post {
+                            try {
+                                created.release()
+                            } catch (_: Exception) {
+                            }
+                        }
                         result.error("decoder", error.message, null)
                     }
                 }
@@ -193,16 +187,24 @@ class MacConnectPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activit
         }
         val decoder = MediaCodec.createDecoderByType(MediaFormat.MIMETYPE_VIDEO_AVC)
         try {
-            decoder.configure(format, surface, null, 0)
-        } catch (error: Exception) {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                format.setInteger(MediaFormat.KEY_LOW_LATENCY, 0)
+            try {
+                decoder.configure(format, surface, null, 0)
+            } catch (_: Exception) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    format.setInteger(MediaFormat.KEY_LOW_LATENCY, 0)
+                }
+                decoder.configure(format, surface, null, 0)
             }
-            decoder.configure(format, surface, null, 0)
+            decoder.start()
+            codec = decoder
+            presentationTimeUs = 0
+        } catch (error: Exception) {
+            try {
+                decoder.release()
+            } catch (_: Exception) {
+            }
+            throw error
         }
-        decoder.start()
-        codec = decoder
-        presentationTimeUs = 0
     }
 
     private fun decode(data: ByteArray): Boolean {
@@ -222,7 +224,10 @@ class MacConnectPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activit
             when {
                 out == MediaCodec.INFO_TRY_AGAIN_LATER -> break
                 out == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED -> continue
-                out >= 0 -> decoder.releaseOutputBuffer(out, true)
+                out >= 0 -> {
+                    decoder.releaseOutputBuffer(out, true)
+                    producer?.scheduleFrame()
+                }
                 else -> break
             }
         }
@@ -230,20 +235,26 @@ class MacConnectPlugin : FlutterPlugin, MethodChannel.MethodCallHandler, Activit
     }
 
     private fun releaseDecoder() {
-        try {
-            codec?.stop()
-        } catch (_: Exception) {
-        }
-        try {
-            codec?.release()
-        } catch (_: Exception) {
-        }
+        val oldCodec = codec
         codec = null
         try {
-            producer?.release()
+            oldCodec?.stop()
         } catch (_: Exception) {
         }
+        try {
+            oldCodec?.release()
+        } catch (_: Exception) {
+        }
+        val oldProducer = producer
         producer = null
+        if (oldProducer != null) {
+            main.post {
+                try {
+                    oldProducer.release()
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     private fun isKeyframe(data: ByteArray): Boolean {

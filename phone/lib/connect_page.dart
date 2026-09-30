@@ -24,6 +24,7 @@ class _ConnectPageState extends State<ConnectPage> {
   Timer? _cableTimer;
   bool _cable = false;
   bool _connecting = false;
+  bool _viewOnly = false;
   String? _error;
   bool _usb = false;
   String? _usbAddress;
@@ -83,10 +84,19 @@ class _ConnectPageState extends State<ConnectPage> {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString(_hostKey, address);
       } catch (_) {}
+      if (!mounted) {
+        await session.close();
+        return;
+      }
       _finder.remember(address);
       await Navigator.of(context).push(
         MaterialPageRoute<void>(
-          builder: (_) => DesktopPage(session: session, hello: hello, title: name),
+          builder: (_) => DesktopPage(
+            session: session,
+            hello: hello,
+            title: name,
+            viewOnly: _viewOnly,
+          ),
         ),
       );
     } catch (error) {
@@ -125,7 +135,15 @@ class _ConnectPageState extends State<ConnectPage> {
                   : 'The phone and the Mac need to be on the same Wi-Fi.',
               style: Theme.of(context).textTheme.bodyLarge?.copyWith(color: const Color(0xFFC8C4BA)),
             ),
-            const SizedBox(height: 20),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('View only'),
+              subtitle: const Text('Watch the Mac. Touch and keys are not sent.'),
+              value: _viewOnly,
+              onChanged: _connecting ? null : (value) => setState(() => _viewOnly = value),
+            ),
+            const SizedBox(height: 8),
             SegmentedButton<bool>(
               segments: const [
                 ButtonSegment(value: false, label: Text('Wi-Fi'), icon: Icon(Icons.wifi)),

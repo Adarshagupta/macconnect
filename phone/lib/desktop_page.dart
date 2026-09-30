@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -13,12 +12,14 @@ class DesktopPage extends StatefulWidget {
   final MacSession session;
   final Hello hello;
   final String title;
+  final bool viewOnly;
 
   const DesktopPage({
     super.key,
     required this.session,
     required this.hello,
     required this.title,
+    this.viewOnly = false,
   });
 
   @override
@@ -32,6 +33,8 @@ class _DesktopPageState extends State<DesktopPage> {
   String? _error;
   bool _waiting = true;
   bool _keyboardOpen = false;
+  bool _drawerOpen = false;
+  late bool _viewOnly;
   bool _rightNext = false;
   bool _gotKey = false;
   bool _leftDown = false;
@@ -53,6 +56,7 @@ class _DesktopPageState extends State<DesktopPage> {
   @override
   void initState() {
     super.initState();
+    _viewOnly = widget.viewOnly;
     HardwareKeyboard.instance.addHandler(_onHardwareKey);
     SystemChrome.setPreferredOrientations(const [
       DeviceOrientation.landscapeLeft,
@@ -96,7 +100,7 @@ class _DesktopPageState extends State<DesktopPage> {
   }
 
   bool _onHardwareKey(KeyEvent event) {
-    if (_keyboardOpen) return false;
+    if (_viewOnly || _keyboardOpen) return false;
     final virtualKey = windowsVirtualKey(event.logicalKey);
     if (virtualKey == null) return false;
     if (event is KeyUpEvent) {
@@ -127,7 +131,31 @@ class _DesktopPageState extends State<DesktopPage> {
     return (x.toDouble(), y.toDouble());
   }
 
+  void _setViewOnly(bool value) {
+    if (value == _viewOnly) return;
+    if (value) {
+      _longPress?.cancel();
+      if (_leftDown) {
+        final point = _downNorm;
+        if (point != null) widget.session.mouseUp(_button, point.$1, point.$2);
+      }
+      for (final virtualKey in _held.toList()) {
+        widget.session.key(virtualKey, false);
+      }
+      _held.clear();
+      _leftDown = false;
+      _dragging = false;
+      _scrollMode = false;
+      _handled = false;
+      _pointers = 0;
+      _primary = null;
+      if (_keyboardOpen) Navigator.of(context).maybePop();
+    }
+    setState(() => _viewOnly = value);
+  }
+
   void _pointerDown(PointerDownEvent event) {
+    if (_viewOnly) return;
     _pointers += 1;
     if (_pointers > 1) {
       _longPress?.cancel();
@@ -158,6 +186,7 @@ class _DesktopPageState extends State<DesktopPage> {
   }
 
   void _pointerMove(PointerMoveEvent event) {
+    if (_viewOnly) return;
     if (_scrollMode) {
       final last = _lastFocal;
       _lastFocal = event.localPosition;
@@ -191,6 +220,7 @@ class _DesktopPageState extends State<DesktopPage> {
   }
 
   void _pointerUp(PointerEvent event) {
+    if (_viewOnly) return;
     _pointers = _pointers > 0 ? _pointers - 1 : 0;
     if (_pointers > 0) return;
     _longPress?.cancel();
@@ -221,6 +251,7 @@ class _DesktopPageState extends State<DesktopPage> {
   }
 
   Future<void> _openKeyboard() async {
+    if (_viewOnly) return;
     setState(() => _keyboardOpen = true);
     await showModalBottomSheet<void>(
       context: context,
@@ -265,117 +296,162 @@ class _DesktopPageState extends State<DesktopPage> {
 
   @override
   Widget build(BuildContext context) {
-    final hello = widget.hello;
     return Scaffold(
       backgroundColor: Colors.black,
-      body: Column(
-        children: [
-          SafeArea(
-            bottom: false,
-            child: SizedBox(
-              height: 48,
-              child: Row(
-                children: [
-                  IconButton(
-                    tooltip: 'Disconnect',
-                    onPressed: () => Navigator.of(context).pop(),
-                    icon: const Icon(Icons.close, color: Colors.white),
+      body: LayoutBuilder(
+        builder: (context, constraints) {
+          _box = Size(constraints.maxWidth, constraints.maxHeight);
+          final rect = _fitted(_box);
+          final allowTouch = _error == null && !_viewOnly;
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              if (_textureId != null)
+                Positioned.fromRect(
+                  rect: rect,
+                  child: Texture(
+                    textureId: _textureId!,
+                    filterQuality: FilterQuality.low,
                   ),
-                  Expanded(
-                    child: Text(
-                      widget.title,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(color: Colors.white),
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: _rightNext ? 'Next tap is a right click' : 'Right click',
-                    onPressed: () => setState(() => _rightNext = !_rightNext),
-                    icon: Icon(
-                      Icons.mouse,
-                      color: _rightNext ? const Color(0xFF8EB7FF) : Colors.white,
-                    ),
-                  ),
-                  IconButton(
-                    tooltip: 'Keyboard',
-                    onPressed: _openKeyboard,
-                    icon: const Icon(Icons.keyboard, color: Colors.white),
-                  ),
-                ],
+                ),
+              Positioned.fill(
+                child: Listener(
+                  behavior: HitTestBehavior.opaque,
+                  onPointerDown: allowTouch ? _pointerDown : null,
+                  onPointerMove: allowTouch ? _pointerMove : null,
+                  onPointerUp: allowTouch ? _pointerUp : null,
+                  onPointerCancel: allowTouch ? _pointerUp : null,
+                  child: const SizedBox.expand(),
+                ),
               ),
-            ),
-          ),
-          Expanded(
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                _box = Size(constraints.maxWidth, constraints.maxHeight);
-                final rect = _fitted(_box);
-                return Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    if (_textureId != null)
-                      Positioned.fromRect(
-                        rect: rect,
-                        child: Texture(
-                          textureId: _textureId!,
-                          filterQuality: FilterQuality.low,
-                        ),
-                      ),
-                    Positioned.fill(
-                      child: Listener(
-                        behavior: HitTestBehavior.opaque,
-                        onPointerDown: _error == null ? _pointerDown : null,
-                        onPointerMove: _error == null ? _pointerMove : null,
-                        onPointerUp: _error == null ? _pointerUp : null,
-                        onPointerCancel: _error == null ? _pointerUp : null,
-                        child: const SizedBox.expand(),
-                      ),
-                    ),
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: ValueListenableBuilder<Offset?>(
-                          valueListenable: _cursor,
-                          builder: (context, cursor, _) {
-                            if (cursor == null) return const SizedBox.shrink();
-                            return Stack(
-                              children: [
-                                Positioned(
-                                  left: rect.left + cursor.dx * rect.width - 1,
-                                  top: rect.top + cursor.dy * rect.height - 1,
-                                  child: const CustomPaint(
-                                    size: Size(16, 20),
-                                    painter: _CursorPainter(),
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        ),
-                      ),
-                    ),
-                    if (_waiting && _error == null)
-                      const IgnorePointer(
-                        child: Center(
-                          child: Text(
-                            'Waiting for the picture…',
-                            style: TextStyle(color: Colors.white70),
+              Positioned.fill(
+                child: IgnorePointer(
+                  child: ValueListenableBuilder<Offset?>(
+                    valueListenable: _cursor,
+                    builder: (context, cursor, _) {
+                      if (cursor == null) return const SizedBox.shrink();
+                      return Stack(
+                        children: [
+                          Positioned(
+                            left: rect.left + cursor.dx * rect.width - 1,
+                            top: rect.top + cursor.dy * rect.height - 1,
+                            child: const CustomPaint(
+                              size: Size(16, 20),
+                              painter: _CursorPainter(),
+                            ),
                           ),
-                        ),
-                      ),
-                    if (_error != null)
-                      Center(
-                        child: Padding(
-                          padding: const EdgeInsets.all(24),
-                          child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)),
-                        ),
-                      ),
-                  ],
-                );
-              },
-            ),
-          ),
-        ],
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+              if (_waiting && _error == null)
+                const IgnorePointer(
+                  child: Center(
+                    child: Text(
+                      'Waiting for the picture…',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+                  ),
+                ),
+              if (_error != null)
+                Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(24),
+                    child: Text(_error!, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white)),
+                  ),
+                ),
+              Positioned(
+                top: MediaQuery.paddingOf(context).top + 8,
+                left: 0,
+                right: 0,
+                child: Align(
+                  alignment: Alignment.topCenter,
+                  child: _drawerOpen ? _openDrawer() : _closedDrawer(),
+                ),
+              ),
+            ],
+          );
+        },
       ),
+    );
+  }
+
+  Widget _closedDrawer() {
+    return Material(
+      color: const Color(0xCC1C1F24),
+      borderRadius: BorderRadius.circular(12),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => setState(() => _drawerOpen = true),
+        child: const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 14, vertical: 5),
+          child: Icon(Icons.expand_more, size: 16, color: Colors.white),
+        ),
+      ),
+    );
+  }
+
+  Widget _openDrawer() {
+    return Material(
+      color: const Color(0xE61C1F24),
+      borderRadius: BorderRadius.circular(20),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            _drawerButton(
+              tooltip: 'Disconnect',
+              onPressed: () => Navigator.of(context).pop(),
+              icon: Icons.close,
+            ),
+            _drawerButton(
+              tooltip: _viewOnly ? 'View only is on' : 'View only',
+              onPressed: () => _setViewOnly(!_viewOnly),
+              icon: _viewOnly ? Icons.visibility : Icons.visibility_outlined,
+              color: _viewOnly ? const Color(0xFF8EB7FF) : Colors.white,
+            ),
+            if (!_viewOnly)
+              _drawerButton(
+                tooltip: _rightNext ? 'Next tap is a right click' : 'Right click',
+                onPressed: () => setState(() => _rightNext = !_rightNext),
+                icon: Icons.mouse,
+                color: _rightNext ? const Color(0xFF8EB7FF) : Colors.white,
+              ),
+            if (!_viewOnly)
+              _drawerButton(
+                tooltip: 'Keyboard',
+                onPressed: _openKeyboard,
+                icon: Icons.keyboard,
+              ),
+            _drawerButton(
+              tooltip: 'Hide',
+              onPressed: () => setState(() => _drawerOpen = false),
+              icon: Icons.expand_less,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _drawerButton({
+    required String tooltip,
+    required VoidCallback onPressed,
+    required IconData icon,
+    Color color = Colors.white,
+  }) {
+    return IconButton(
+      tooltip: tooltip,
+      onPressed: onPressed,
+      icon: Icon(icon, color: color),
+      iconSize: 18,
+      visualDensity: VisualDensity.compact,
+      padding: EdgeInsets.zero,
+      constraints: const BoxConstraints.tightFor(width: 36, height: 32),
     );
   }
 }

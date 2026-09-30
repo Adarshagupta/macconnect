@@ -24,6 +24,7 @@ public sealed class SessionService : IDisposable
     private TcpListener? _listener;
     private Connection? _current;
     private Connection? _active;
+    private int _framesLogged;
 
     public SessionService(AllowListStore allowList, Func<string, bool> approveMac, int port = Wire.TcpPort)
     {
@@ -218,6 +219,12 @@ public sealed class SessionService : IDisposable
                     case Wire.Frame:
                         if (ReferenceEquals(_active, connection))
                         {
+                            if (_framesLogged < 3)
+                            {
+                                _framesLogged++;
+                                ViewerLog.Write($"Mac picture {_framesLogged}: {message.Value.Payload.Length} bytes");
+                            }
+
                             FrameReceived?.Invoke(message.Value.Payload);
                         }
 

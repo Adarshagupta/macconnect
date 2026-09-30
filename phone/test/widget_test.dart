@@ -13,6 +13,7 @@ void main() {
     expect(find.text('Wi-Fi'), findsOneWidget);
     expect(find.text('Cable'), findsOneWidget);
     expect(find.text('Use your Mac from this phone.'), findsOneWidget);
+    expect(find.text('View only'), findsOneWidget);
 
     await tester.tap(find.text('Cable'));
     await tester.pump();

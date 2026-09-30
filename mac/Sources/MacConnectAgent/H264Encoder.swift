@@ -115,7 +115,8 @@ final class H264Encoder {
         }
         // Wait long enough for a hard frame (a window being dragged). Giving up here drops a picture
         // the next one still refers to, which shows up as glitches until the next keyframe.
-        if finished.wait(timeout: .now() + .milliseconds(150)) == .timedOut {
+        if finished.wait(timeout: .now() + .milliseconds(500)) == .timedOut {
+            Log.line("The desktop picture took too long to compress, so it was skipped")
             needsKeyframe = true
             return nil
         }

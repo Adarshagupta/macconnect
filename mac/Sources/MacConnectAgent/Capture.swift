@@ -74,7 +74,9 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
         guard type == .screen, CMSampleBufferIsValid(sampleBuffer) else { return }
-        if isEmptyFrame(sampleBuffer) { return }
+        // Idle frames have no new pixels. Blank frames are kept: they are what macOS sends when the
+        // panel is asleep, and dropping them leaves Windows with a pointer and no desktop.
+        if isIdleFrame(sampleBuffer) { return }
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         onFrame(pixelBuffer)
     }
@@ -83,13 +85,13 @@ final class DisplayCapture: NSObject, SCStreamOutput, SCStreamDelegate {
         onStop?(error.localizedDescription)
     }
 
-    /// Status frames that carry no new picture.
-    private func isEmptyFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
+    /// Status frames that carry no new picture. A blank frame still has pixels, so it is not idle.
+    private func isIdleFrame(_ sampleBuffer: CMSampleBuffer) -> Bool {
         guard let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let raw = attachments.first?[.status] as? Int,
               let status = SCFrameStatus(rawValue: raw) else {
             return false
         }
-        return status == .idle || status == .blank
+        return status == .idle
     }
 }

@@ -12,7 +12,7 @@ int? windowsVirtualKey(LogicalKeyboardKey key) {
   return null;
 }
 
-const _named = <LogicalKeyboardKey, int>{
+final _named = <LogicalKeyboardKey, int>{
   LogicalKeyboardKey.backspace: 0x08,
   LogicalKeyboardKey.tab: 0x09,
   LogicalKeyboardKey.enter: 0x0D,
